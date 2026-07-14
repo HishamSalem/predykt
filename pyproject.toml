@@ -40,6 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff"]
+test = ["pytest>=7", "lightgbm>=3.3", "xgboost>=1.7", "catboost>=1.2"]
 
 [project.urls]
 Homepage = "https://github.com/HishamSalem/predykt"
