@@ -1,17 +1,24 @@
-from .feature_binning import FeatureBinningAnalyzer
+from .adapters import (
+    CatBoostAdapter,
+    ModelAdapter,
+    PandasCategoricalAdapter,
+    SklearnAdapter,
+    resolve_adapter,
+)
+from .criteria import (
+    CustomEstimator,
+    HSICEstimator,
+    OLSEstimator,
+    Stage2Estimator,
+    Stage2Result,
+)
 from .cyclical_transformer import CyclicalBinner
+from .feature_binning import FeatureBinningAnalyzer
+from .fwl import ResidualRepresentationTester
 from .interaction_stability import InteractionTester, InteractionVoter
 from .seed_robustness import SeedRobustnessValidator
-from .criteria import Stage2Estimator, Stage2Result, OLSEstimator, HSICEstimator, CustomEstimator
-from .fwl import ResidualRepresentationTester
 from .shap_analyzer import SHAPInteractionAnalyzer
-from .adapters import (
-    ModelAdapter, 
-    SklearnAdapter, 
-    PandasCategoricalAdapter, 
-    CatBoostAdapter, 
-    resolve_adapter
-)
+
 __version__ = "0.1.2"
 __author__ = "Hisham Salem"
 
