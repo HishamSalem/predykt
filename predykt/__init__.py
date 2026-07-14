@@ -5,7 +5,13 @@ from .seed_robustness import SeedRobustnessValidator
 from .criteria import Stage2Estimator, Stage2Result, OLSEstimator, HSICEstimator, CustomEstimator
 from .fwl import ResidualRepresentationTester
 from .shap_analyzer import SHAPInteractionAnalyzer
-
+from .adapters import (
+    ModelAdapter, 
+    SklearnAdapter, 
+    PandasCategoricalAdapter, 
+    CatBoostAdapter, 
+    resolve_adapter
+)
 __version__ = "0.1.2"
 __author__ = "Hisham Salem"
 
@@ -22,4 +28,9 @@ __all__ = [
     "CustomEstimator",
     "ResidualRepresentationTester",
     "SHAPInteractionAnalyzer",
+    "ModelAdapter",
+    "SklearnAdapter",
+    "PandasCategoricalAdapter",
+    "CatBoostAdapter",
+    "resolve_adapter",
 ]
