@@ -235,7 +235,7 @@ print(table)
 
 After confirming an interaction pair is stable, `ResidualRepresentationTester` asks: does a specific engineered transformation of that pair explain structure the base model missed?
 
-The test uses the Frisch–Waugh–Lovell theorem. Stage 1 computes out-of-fold residuals Ỹ = y − p̂ via K-fold cross-fitting. Stage 2 regresses Ỹ on the candidate feature Tₖ and tests H₀: β₁ = 0. **A significant result provides evidence that Tₖ captures structure the base model did not** — it is a screening signal, not a proof of causal necessity.
+This is a **residual specification test**, not an application of Frisch–Waugh–Lovell (FWL) or Double/Debiased ML (DML). Those frameworks recover an unbiased coefficient for a causal or structural parameter by residualizing *both* the outcome and the treatment/regressor of interest against the same conditioning set; that equivalence is what their proofs establish. Here, only the outcome is residualized — Stage 1 computes out-of-fold residuals Ỹ = y − p̂ via K-fold cross-fitting (a standard nested-CV procedure, sharing only its cross-fitting mechanics with Chernozhukov et al. 2018's DML, not its Neyman-orthogonal-score guarantees). Stage 2 regresses Ỹ on the raw candidate feature Tₖ and tests H₀: β₁ = 0. This is closer in lineage to Ramsey's RESET test (1969) and partial / component-plus-residual plots (Ezekiel 1924) than to FWL/DML, and it makes no causal claim. **A significant result provides evidence that Tₖ correlates with structure the base model did not capture** — it is a feature-screening signal, not a partialled-regression coefficient and not a proof of causal necessity. Because the treatment side is never residualized, this procedure has none of DML's protection against Stage-1 misspecification: validity depends entirely on the base model being reasonably well-specified.
 
 ```python
 import numpy as np
@@ -265,7 +265,7 @@ print(tester.results_to_dataframe())
 # Best representation per pair
 winners = tester.winning_representations()
 
-# Placebo + bootstrap refutation checks -> populates the `robust` column
+# Placebo + subsample refutation checks -> populates the `robust` column
 tester.refute(n_permutations=100, n_bootstrap=50)
 print(tester.results_to_dataframe()[["representation", "rejected", "robust"]])
 ```
@@ -275,7 +275,7 @@ print(tester.results_to_dataframe()[["representation", "rejected", "robust"]])
 **Criteria:**
 
 | Criterion         | What it tests                                                           |
-| ----------------- | ----------------------------------------------------------------------- |
+| ----------------- | ------------------------------------------------------------------------ |
 | `OLSEstimator`    | Linear association (HC3 robust SE, handles heteroskedastic residuals)   |
 | `HSICEstimator`   | Nonlinear / non-monotone dependence (kernel-based, permutation p-value) |
 | `CustomEstimator` | Any user-supplied callable returning a `Stage2Result`                   |
@@ -335,9 +335,9 @@ print(group_comparison)
 **Reading the layers:**
 
 | Comparison                          | What it tells you                                                               |
-| ----------------------------------- | ------------------------------------------------------------------------------- |
-| Layer 1 − Layer 2 per group         | How much of the group's apparent importance comes from cross-group interactions |
-| Layer 2 − Σ(Layer 3 within group)   | Within-group collinearity aliasing even after cross-group correction            |
+| ------------------------------------ | --------------------------------------------------------------------------------- |
+| Layer 1 − Layer 2 per group          | How much of the group's apparent importance comes from cross-group interactions |
+| Layer 2 − Σ(Layer 3 within group)    | Within-group collinearity aliasing even after cross-group correction            |
 
 ## Design Decisions
 
@@ -350,6 +350,8 @@ print(group_comparison)
 **Why HC3 robust standard errors in OLSEstimator?** For binary targets, residuals Ỹ = y − p̂ have observation-specific variance p̂(1−p̂). OLS with homoskedastic standard errors is misspecified. HC3 (MacKinnon & White 1985) corrects this and is the default.
 
 **Why HSIC alongside OLS?** OLS only detects linear association. HSIC (Hilbert–Schmidt Independence Criterion) is a kernel-based nonparametric test that detects any dependence structure, including nonlinear and non-monotone relationships. Running both gives a more complete picture of whether a representation carries signal.
+
+**Why isn't Residual Representation Testing called FWL or DML?** Because it only residualizes one side of the regression (the outcome). FWL and DML derive their guarantees from residualizing both the outcome and the treatment/regressor against the same conditioning set; that two-sided residualization is what their equivalence and orthogonality proofs actually require. Tₖ here is a deterministic function of X, so residualizing it against X is degenerate (T̃ₖ ≡ 0) — there is no valid second partialled regressor to construct. What's implemented is a one-sided residual-on-feature test: legitimate as a feature-screening diagnostic, but it should not be presented as recovering an FWL-equivalent coefficient or a DML-style debiased causal estimate, since neither guarantee is being invoked.
 
 ## Testing
 
