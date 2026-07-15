@@ -7,27 +7,54 @@ learned, using a residual-based approach as an honest baseline.
 
 Theory
 ------
-Frisch-Waugh-Lovell (1933): In Y ~ β·T + γ·X, the coefficient β equals that
-from regressing partialled-out Ỹ on partialled-out T̃.
+This is a residual specification test, not an application of Frisch-Waugh-
+Lovell (FWL) or Double/Debiased ML (DML). Those frameworks recover an
+unbiased coefficient for a causal/structural parameter in the presence of
+confounders, and their validity proofs require residualizing BOTH sides of
+the regression (outcome and treatment) against the same conditioning set.
+This procedure only residualizes one side, so it does not invoke that
+equivalence and makes no causal claim. It answers a narrower, purely
+predictive question: does a candidate engineered feature still correlate
+with a fitted model's out-of-fold errors?
 
-Extended nonparametrically (Chernozhukov et al. 2018, Double/Debiased ML):
+Procedure:
   Stage 1: Fit base model on full X via K-fold cross-fitting.
            Compute OOF residuals: Ỹ = y − p̂.
-  Stage 2: Regress Ỹ on Tₖ and test H₀: β₁ = 0.
+  Stage 2: Regress Ỹ on raw Tₖ and test H₀: β₁ = 0.
 
-T residualization degeneracy (this is correct, not a limitation):
-  Tₖ = f(xᵢ, xⱼ) is a deterministic function of X.
-  Therefore E[Tₖ | X] = Tₖ and T̃ₖ = 0.
-  Only outcome residualization is needed.
+Why Tₖ is not residualized:
+  Tₖ = f(xᵢ, xⱼ) is a deterministic function of X, so a regression of Tₖ on
+  X is degenerate (T̃ₖ ≡ 0) and there is no second partialled regressor to
+  pair with Ỹ. This is precisely why the procedure is not FWL: FWL's
+  content is the equivalence between a joint-model coefficient and the
+  twice-partialled bivariate coefficient, and that equivalence is never
+  invoked here. What remains is a simpler, one-sided diagnostic in the
+  tradition of Ramsey's RESET test (1969) and partial / component-plus-
+  residual plots (Ezekiel 1924; Larsen & McCleary 1972): regress model
+  residuals on a candidate feature and test for remaining structure.
+
+Cross-fitting note:
+  The K-fold out-of-fold residual computation (Stage 1) is standard nested/
+  stacked cross-validation (Wolpert 1992; Breiman 1996), used here to avoid
+  in-sample overfitting bias in Ỹ. It is the one component that overlaps
+  with Chernozhukov et al. (2018)'s DML machinery. DML's other essential
+  ingredient — Neyman-orthogonal scores obtained by also residualizing the
+  treatment side — is not implemented, so this should not be described or
+  cited as DML.
 
 What a significant β₁ means:
   The base model already learned an interaction between xᵢ and xⱼ.
   Ỹ = what it failed to explain.
-  β₁ ≠ 0 → the functional form Tₖ captures structure the model missed.
+  β₁ ≠ 0 → the functional form Tₖ correlates with structure the model
+  missed. This is a feature-screening signal, not a causal effect estimate
+  and not a partialled-regression coefficient.
 
 Critical assumption:
   Base model must be well-specified and not underfit. If the model is weak,
   Ỹ is large for unrelated reasons and β₁ would be spuriously inflated.
+  Unlike DML, this procedure has no orthogonality property that protects it
+  from Stage-1 misspecification — validity here rests entirely on Stage-1
+  adequacy, which is a strictly weaker guarantee than DML provides.
 
 Multiple testing correction:
   Only meaningful when K ≥ 2 representations are tested simultaneously.
@@ -312,8 +339,9 @@ class ResidualRepresentationTester:
            empirical_pvalue = P(|t_perm| ≥ |t_obs|) under H₀.
            A large empirical_pvalue means the signal could be noise.
 
-        2. Bootstrap stability: re-runs stage-2 on 80% subsamples.
-           stability_score = fraction of bootstrap runs where p < alpha.
+        2. Subsample stability: re-runs stage-2 on 80% subsamples (without
+           replacement).
+           stability_score = fraction of subsample runs where p < alpha.
 
         3. robust = rejected AND empirical_pvalue < alpha AND
                     stability_score ≥ stability_threshold.
@@ -322,6 +350,8 @@ class ResidualRepresentationTester:
         ----------
         n_permutations : int, default=100
         n_bootstrap : int, default=50
+            Number of subsample runs (80% subsampling without replacement,
+            not classical bootstrap with replacement).
         stability_threshold : float, default=0.8
 
         Returns
@@ -366,7 +396,7 @@ class ResidualRepresentationTester:
             )
             row["empirical_pvalue"] = emp_pval
 
-            # 2. Bootstrap stability
+            # 2. Subsample stability
             sig_count = 0
             for _ in range(n_bootstrap):
                 idx = rng.choice(n, size=subsample_size, replace=False)
