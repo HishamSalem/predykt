@@ -19,7 +19,8 @@ from .interaction_stability import InteractionTester, InteractionVoter
 from .seed_robustness import SeedRobustnessValidator
 from .shap_analyzer import SHAPInteractionAnalyzer
 
-from ._version import version as __version__
+from ._version import version as version  # noqa: F401  (setuptools-scm generated)
+__version__ = version
 __author__ = "Hisham Salem"
 
 __all__ = [
