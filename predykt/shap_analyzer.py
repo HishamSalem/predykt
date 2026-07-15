@@ -25,7 +25,7 @@ THEORETICAL FOUNDATIONS:
 import warnings
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 
 class SHAPInteractionAnalyzer:

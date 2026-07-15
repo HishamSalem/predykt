@@ -41,11 +41,11 @@ Refutation:
 import logging
 import numpy as np
 import pandas as pd
-from sklearn.base import clone
 from sklearn.model_selection import KFold
 from statsmodels.stats.multitest import multipletests
 from typing import Dict, List, Optional, Tuple, Union
 
+from .adapters import resolve_adapter
 from .criteria import Stage2Estimator, OLSEstimator, Stage2Result
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,11 @@ class ResidualRepresentationTester:
         ``stage2`` is accepted as a backward-compatible alias.
     n_folds : int, default=5
         K-fold cross-fitting folds.
+    fit_params : dict, optional
+        Extra keyword arguments forwarded to the stage-1 model's ``fit()``
+        (e.g. ``{"categorical_feature": [...]}`` for LightGBM). Ignored if
+        ``model`` is already a ``ModelAdapter`` -- put fit kwargs inside the
+        adapter instead.
     correction_method : str, default="fdr_bh"
         Multiple testing correction applied when K ≥ 2 representations are
         tested. "fdr_bh" (Benjamini-Hochberg) or "bonferroni". No-op when K=1.
@@ -88,6 +93,7 @@ class ResidualRepresentationTester:
         model=None,
         stage2: Optional[Stage2Estimator] = None,
         n_folds: int = 5,
+        fit_params: Optional[Dict] = None,
         correction_method: str = "fdr_bh",
         correction_scope: str = "per_pair",
         alpha: float = 0.05,
@@ -95,6 +101,7 @@ class ResidualRepresentationTester:
         criterion=None,
     ):
         self.model = model
+        self.fit_params = dict(fit_params or {})
         resolved = criterion if criterion is not None else stage2
         if resolved is None:
             resolved = OLSEstimator(alpha=alpha)
@@ -122,15 +129,29 @@ class ResidualRepresentationTester:
         y = np.asarray(y, dtype=float).ravel()
         p_hat = np.zeros_like(y)
         kf = KFold(n_splits=self.n_folds, shuffle=True, random_state=self.random_state)
+        base_adapter = resolve_adapter(self.model, self.fit_params)
 
         for train_idx, val_idx in kf.split(X):
-            mdl = clone(self.model)
+            ad = base_adapter.clone()
             X_tr = X.iloc[train_idx] if isinstance(X, pd.DataFrame) else X[train_idx]
             X_va = X.iloc[val_idx]   if isinstance(X, pd.DataFrame) else X[val_idx]
-            mdl.fit(X_tr, y[train_idx])
-            p_hat[val_idx] = mdl.predict_proba(X_va)[:, 1]
+            ad.fit(X_tr, y[train_idx])
+            p_hat[val_idx] = ad.predict_proba(X_va)[:, 1]
 
         return y - p_hat
+
+    def _check_alignment(self, rep_df: pd.DataFrame, X: pd.DataFrame, pair: Tuple) -> None:
+        n_resid = len(self.Y_resid_)
+        if len(rep_df) != n_resid:
+            raise ValueError(
+                f"Representations for pair {pair} have {len(rep_df)} rows but "
+                f"must align 1:1 with X/y ({n_resid} rows)."
+            )
+        if isinstance(X, pd.DataFrame) and not rep_df.index.equals(X.index):
+            logger.warning(
+                "Representations for pair %s have a different row order than X; "
+                "verify row alignment before interpreting results.", pair,
+            )
 
     # =========================================================================
     # FIT
@@ -200,6 +221,7 @@ class ResidualRepresentationTester:
                     f"Available keys: {list(rep_dict.keys())}"
                 )
             rep_df = rep_dict[pair]
+            self._check_alignment(rep_df, X, pair)
 
             for col in rep_df.columns:
                 T_k = rep_df[col].values.astype(float)

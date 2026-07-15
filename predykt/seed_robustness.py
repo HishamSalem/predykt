@@ -405,7 +405,7 @@ class SeedRobustnessValidator:
         print(f"{'Seeds evaluated:':<30} {len(report.seeds)}")
         print(f"{'sigma_max (threshold):':<30} {report.sigma_max:.6f}")
 
-        print(f"\n--- Descriptive Statistics ---")
+        print("\n--- Descriptive Statistics ---")
         print(f"{'Mean:':<30} {report.mean:.6f}")
         print(f"{'Std (sample):':<30} {report.std:.6f}")
         print(f"{'CV:':<30} {report.cv * 100:.2f}%")
@@ -415,24 +415,24 @@ class SeedRobustnessValidator:
         print(f"{'Max:':<30} {report.max_score:.6f}")
         print(f"{'Range:':<30} {report.range_score:.6f}")
 
-        print(f"\n--- Normality (Shapiro-Wilk) ---")
+        print("\n--- Normality (Shapiro-Wilk) ---")
         print(f"{'Statistic:':<30} {report.shapiro_stat:.6f}")
         print(f"{'p-value:':<30} {report.shapiro_p:.4f}")
         print(f"{'Normal (alpha=' + str(self.alpha) + '):':<30} {'YES' if report.is_normal else 'NO'}")
 
-        print(f"\n--- Chi-Square Variance Test ---")
+        print("\n--- Chi-Square Variance Test ---")
         print(f"{'H0: sigma^2 <= sigma_max^2'}")
         print(f"{'Test statistic:':<30} {report.chisq_stat:.4f}")
         print(f"{'p-value:':<30} {report.chisq_p:.4f}")
         print(f"{'Variance acceptable:':<30} {'YES' if report.variance_acceptable else 'NO'}")
 
-        print(f"\n--- 95/95 Tolerance Interval ---")
+        print("\n--- 95/95 Tolerance Interval ---")
         print(f"{'k-factor:':<30} {report.tol_k:.4f}")
         print(f"{'Lower bound:':<30} {report.tol_lower:.6f}")
         print(f"{'Upper bound:':<30} {report.tol_upper:.6f}")
         print(f"{'Width:':<30} {report.tol_upper - report.tol_lower:.6f}")
 
-        print(f"\n--- Bootstrap 95% CI for Std ---")
+        print("\n--- Bootstrap 95% CI for Std ---")
         print(f"{'Lower:':<30} {report.bootstrap_std_ci_lower:.6f}")
         print(f"{'Upper:':<30} {report.bootstrap_std_ci_upper:.6f}")
 
@@ -458,7 +458,6 @@ class SeedRobustnessValidator:
             If provided, saves the figure to this path. Otherwise calls plt.show().
         """
         import matplotlib.pyplot as plt
-        from matplotlib.patches import FancyBboxPatch
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(

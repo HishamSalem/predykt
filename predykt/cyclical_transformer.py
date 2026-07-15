@@ -16,7 +16,7 @@ import numpy as np
 from numba import njit
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 from dataclasses import dataclass
 import time
 

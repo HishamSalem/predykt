@@ -127,6 +127,9 @@ class InteractionTester:
         Whether to use GPU-accelerated SHAP explainer.
     n_jobs : int
         Number of parallel jobs for seed fitting. -1 for all cores.
+    fit_params : dict, optional
+        Extra keyword arguments forwarded to ``model.fit()`` on every seed
+        (e.g. ``{"sample_weight": w}``).
     """
 
     def __init__(
@@ -138,6 +141,7 @@ class InteractionTester:
         alpha: float = 0.05,
         use_gpu: bool = False,
         n_jobs: int = 1,
+        fit_params: Optional[dict] = None,
     ):
         self.model_class = model_class
         self.base_params = base_params
@@ -146,12 +150,23 @@ class InteractionTester:
         self.alpha = alpha
         self.use_gpu = use_gpu
         self.n_jobs = multiprocessing.cpu_count() if n_jobs == -1 else n_jobs
+        self.fit_params = dict(fit_params or {})
 
         # Validate seed_param not in base_params
         if seed_param in base_params:
             raise ValueError(
                 f"'{seed_param}' should not be in base_params. "
                 f"It will be set automatically per seed."
+            )
+
+    @staticmethod
+    def _validate_numeric_X(X: pd.DataFrame) -> None:
+        bad = {c: X[c].dtype for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])}
+        if bad:
+            details = ", ".join(f"{c}: {dt}" for c, dt in bad.items())
+            raise ValueError(
+                "InteractionTester requires X to be fully numeric (int, float, "
+                f"or bool). Non-numeric columns found: {details}"
             )
 
     def _fit_single_seed(
@@ -169,7 +184,7 @@ class InteractionTester:
         """
         params = {**self.base_params, self.seed_param: seed}
         model = self.model_class(**params)
-        model.fit(X, y)
+        model.fit(X, y, **self.fit_params)
 
         # Compute SHAP interaction values
         if self.use_gpu:
@@ -263,6 +278,7 @@ class InteractionTester:
         List of InteractionResult, one per pair. Each result contains
         an instability_score (lower = more robust) and a robust flag.
         """
+        self._validate_numeric_X(X)
         if seeds is None:
             seeds = np.arange(self.n_seeds)
 
@@ -336,9 +352,10 @@ class InteractionTester:
         filter out. This is intentional: it's a cheap pre-filter,
         not a final result.
         """
+        self._validate_numeric_X(X)
         params = {**self.base_params, self.seed_param: seed}
         model = self.model_class(**params)
-        model.fit(X, y)
+        model.fit(X, y, **self.fit_params)
 
         explainer = shap.TreeExplainer(model)
         interactions = explainer.shap_interaction_values(X)

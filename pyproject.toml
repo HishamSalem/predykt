@@ -26,7 +26,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.22",
     "pandas>=1.5",
-    "scikit-learn>=1.1",
+    "scikit-learn>=1.1,<1.8",  # optbinning calls check_array(force_all_finite=...), removed in sklearn 1.8
     "shap>=0.41",
     "optbinning>=0.17",
     "scipy>=1.9",
