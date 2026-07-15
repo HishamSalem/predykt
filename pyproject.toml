@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools>=77", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -44,8 +44,10 @@ Homepage = "https://github.com/HishamSalem/predykt"
 Documentation = "https://github.com/HishamSalem/predykt#readme"
 Issues = "https://github.com/HishamSalem/predykt/issues"
 
-[tool.setuptools.dynamic]
-version = {attr = "predykt.__version__"}
+# Version is derived from the latest git tag (e.g. v0.2.0 -> 0.2.0).
+# No version string lives in any file; tag the release and build.
+[tool.setuptools_scm]
+version_file = "predykt/_version.py"
 
 [tool.setuptools.packages.find]
 where = ["."]
