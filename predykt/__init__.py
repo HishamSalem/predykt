@@ -19,7 +19,7 @@ from .interaction_stability import InteractionTester, InteractionVoter
 from .seed_robustness import SeedRobustnessValidator
 from .shap_analyzer import SHAPInteractionAnalyzer
 
-__version__ = "0.1.2"
+from ._version import version as __version__
 __author__ = "Hisham Salem"
 
 __all__ = [
