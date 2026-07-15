@@ -33,8 +33,6 @@ from typing import Dict, List, Optional, Tuple, Any
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import shap
-import matplotlib.pyplot as plt
-import seaborn as sns
 import warnings
 import multiprocessing
 
@@ -420,6 +418,9 @@ class InteractionTester:
         figsize: Tuple[int, int] = (10, 6),
     ):
         """Plot seed distribution of interaction values with zero reference."""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
         fig, axes = plt.subplots(1, 2, figsize=(figsize[0] * 2, figsize[1]))
 
         # Left: interaction value distribution
@@ -467,6 +468,8 @@ class InteractionTester:
         Plot running mean and std of interaction value across seeds.
         Useful for determining if n_seeds is sufficient for stability.
         """
+        import matplotlib.pyplot as plt
+
         dist = result.interaction_distribution
         running_mean = np.cumsum(dist) / np.arange(1, len(dist) + 1)
         running_std = np.array([
@@ -497,6 +500,9 @@ class InteractionTester:
         figsize: Tuple[int, int] = (12, 8),
     ):
         """Plot top feature interactions by per-interaction AUC."""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
         plot_df = results_df.nlargest(top_n, "Per_Interaction_AUC").copy()
         plot_df["Feature Pair"] = plot_df["Feature_i"] + " x " + plot_df["Feature_j"]
 
@@ -648,6 +654,9 @@ class InteractionVoter:
         figsize: Tuple[int, int] = (14, 8),
     ):
         """Heatmap: algorithms (columns) x feature pairs (rows), colored by AUC."""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
         algo_names = list(self.testers.keys())
         pair_labels = [f"{vr.feature_i} x {vr.feature_j}" for vr in vote_results]
 

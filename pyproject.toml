@@ -9,8 +9,6 @@ description = "A rigorous Python toolkit for predictive ML — feature analysis,
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-# TODO: Replace PUBLIC_EMAIL_HERE with a dedicated public contact email
-# before publishing to PyPI. Do NOT use your personal/account email.
 authors = [
     {name = "Hisham Salem", email = "predktpackage@gmail.com"},
 ]
@@ -32,8 +30,6 @@ dependencies = [
     "scipy>=1.9",
     "statsmodels>=0.13",
     "tqdm>=4.64",
-    "matplotlib>=3.5",
-    "seaborn>=0.12",
     "joblib>=1.1",
     "numba>=0.56",
 ]
@@ -41,9 +37,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff"]
 test = ["pytest>=7", "lightgbm>=3.3", "xgboost>=1.7", "catboost>=1.2"]
+plot = ["matplotlib>=3.5", "seaborn>=0.12"]
 
 [project.urls]
 Homepage = "https://github.com/HishamSalem/predykt"
+Documentation = "https://github.com/HishamSalem/predykt#readme"
+Issues = "https://github.com/HishamSalem/predykt/issues"
 
 [tool.setuptools.dynamic]
 version = {attr = "predykt.__version__"}
