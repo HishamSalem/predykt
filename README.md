@@ -1,6 +1,8 @@
 # predykt
 
-A Python toolkit for rigorous feature interaction analysis in machine learning models. Combines cyclical optimal binning, SHAP interaction stability testing, residual representation testing, and seed robustness validation into a unified workflow for credit risk and tabular ML.
+> ⚠️ **Alpha (0.x):** APIs may change between minor versions without deprecation. Pin a version in production.
+
+A Python toolkit for rigorous feature interaction analysis in machine learning models. It brings together cyclical optimal binning, SHAP interaction stability testing, residual representation testing, and seed robustness validation as a **layered protocol** for tabular ML - each tool strips out a different way a result can be an artifact of one arbitrary choice (one seed, one algorithm, one fit, one calendar encoding).
 
 ## Why predykt?
 
@@ -11,7 +13,7 @@ Standard ML libraries treat feature analysis as a single-pass operation: fit onc
 - Your HPO result is **lucky**: the best config from your tuning run may only be best for that seed
 - Your engineered feature needs **validation**: a candidate transformation may not explain residual structure the base model missed
 
-predykt addresses each of these failure modes with dedicated, statistically grounded tools.
+predykt addresses each of these failure modes with a dedicated, statistically grounded tool.
 
 ## Installation
 
@@ -19,21 +21,33 @@ predykt addresses each of these failure modes with dedicated, statistically grou
 pip install predykt
 ```
 
-**Dependencies:** `numpy`, `numba`, `scikit-learn`, `pandas`, `shap`, `scipy`, `statsmodels`, `optbinning`, `matplotlib`, `seaborn`, `joblib`, `tqdm`
+**Core dependencies:** `numpy`, `numba`, `scikit-learn` (`>=1.1,<1.8`), `pandas`, `shap`, `scipy`, `statsmodels`, `optbinning`, `joblib`, `tqdm`
+
+**Optional extras:**
+
+```bash
+pip install "predykt[plot]"   # matplotlib + seaborn, for the plot_* methods
+pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the test suite
+```
+
+> The `scikit-learn<1.8` pin is deliberate: optbinning calls `check_array(force_all_finite=...)`, an argument removed in scikit-learn 1.8.
 
 ## Modules
 
-| Module | What it does |
-|--------|-------------|
-| `CyclicalBinner` | IV-maximizing optimal binning for circular temporal features |
-| `InteractionTester` | SHAP interaction stability testing via refit-across-seeds |
-| `InteractionVoter` | Cross-algorithm voting to distinguish data interactions from algorithm artifacts |
-| `SeedRobustnessValidator` | Statistical validation of hyperparameter config robustness across seeds |
-| `FeatureBinningAnalyzer` | IV uplift screening for feature pair interactions via OptBinning |
+| Module                         | What it does                                                                              |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `CyclicalBinner`               | IV-maximizing optimal binning for circular temporal features                              |
+| `InteractionTester`            | SHAP interaction stability testing via refit-across-seeds                                 |
+| `InteractionVoter`             | Cross-algorithm voting to distinguish data interactions from algorithm artifacts          |
+| `SeedRobustnessValidator`      | Statistical validation of hyperparameter config robustness across seeds                   |
+| `FeatureBinningAnalyzer`       | IV uplift screening for feature pair interactions via OptBinning                          |
 | `ResidualRepresentationTester` | Residual-based test of whether an engineered representation explains base-model residuals |
-| `SHAPInteractionAnalyzer` | Three-layer SHAP attribution corrected for collinearity and cross-group aliasing |
+| `SHAPInteractionAnalyzer`      | Three-layer SHAP attribution corrected for collinearity and cross-group aliasing          |
+| `CatBoostAdapter` / `PandasCategoricalAdapter` | Let the residual tester cross-fit native-categorical models (CatBoost / LightGBM / XGBoost) |
 
 ## Quick Start
+
+> **Note on runtime:** examples using `n_seeds=200` or large `n_estimators` are illustrative of real production settings and can take minutes. Drop `n_seeds` to ~20 and estimators to ~50 for a fast smoke test.
 
 ### 1. Cyclical Optimal Binning
 
@@ -59,29 +73,12 @@ print(f"IV: {binner.iv_:.4f}")
 print(binner.result_.summary())
 ```
 
-**Output (example):**
-```
-Optimal bins: 3
-Split points: [ 3  8 22]
-IV: 0.1823
+**Transform to WOE for a scorecard:**
 
-   bin       range  count  count_%  events  non_events  event_rate       woe        iv
-0    0    [3, 8)   2082    20.82      83        1999    0.039878 -0.3421    0.011
-1    1   [8, 22)  5831    58.31     227        5604    0.038932 -0.3665    0.038
-2    2  [22, 3)*  2087    20.87     312        1775    0.149496  1.1803    0.133
-...
-```
-
-**Transform to WOE for scorecard:**
 ```python
-# Bin index
-binned = binner.transform(hours)
-
-# WOE directly (for logistic regression scorecards)
-woe_encoded = binner.transform_woe(hours)
-
-# WOE lookup table for documentation
-woe_table = binner.result_.woe_table()
+binned      = binner.transform(hours)       # bin index
+woe_encoded = binner.transform_woe(hours)   # WOE directly (for LR scorecards)
+woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 ```
 
 ### 2. SHAP Interaction Stability Testing
@@ -102,7 +99,7 @@ tester = InteractionTester(
         "verbosity": 0,
     },
     seed_param="random_state",
-    n_seeds=200,
+    n_seeds=200,          # illustrative; use ~20 for a quick check
     alpha=0.05,
     n_jobs=4,
 )
@@ -110,25 +107,25 @@ tester = InteractionTester(
 # Step 1: cheap single-seed screen to identify candidate pairs
 top_pairs = tester.get_top_n_interactions(X, y, n=10)
 
-# Step 2: full stability test across 200 seeds
+# Step 2: full stability test across seeds
 results = tester.test_pairs(X, y, top_pairs)
 
-# Step 3: results with optional BH multiple testing correction
+# Step 3: results with optional BH multiple-testing correction
 df = tester.results_to_dataframe(results, correction_method="fdr_bh")
 print(df[["Feature_i", "Feature_j", "Instability_Score", "Per_Interaction_AUC", "Robust"]])
 ```
 
+> `InteractionTester` requires **numeric-only** features — SHAP interaction values do not support native categorical splits. Encode categoricals (ordinal / target / WoE) before testing.
+
 **What `instability_score` means:**
+
 - Proportion of seeds where the interaction's sign opposes the majority direction (doubled for two-sidedness)
 - Range [0, 1]. Lower = more stable.
 - **This is not a frequentist p-value.** It measures algorithmic stability, not statistical significance under a null derived from the data-generating process.
 
 ```python
-# Visualize seed distribution for a specific pair
-tester.plot_interaction_distribution(results[0])
-
-# Check if 200 seeds was enough for convergence
-tester.plot_convergence(results[0])
+tester.plot_interaction_distribution(results[0])   # requires predykt[plot]
+tester.plot_convergence(results[0])                # was n_seeds enough?
 ```
 
 ### 3. Cross-Algorithm Voting
@@ -142,32 +139,24 @@ from sklearn.ensemble import RandomForestClassifier
 from predykt import InteractionVoter
 
 configs = {
-    "rf": {
-        "model_class": RandomForestClassifier,
-        "params": {"n_estimators": 200, "max_depth": 5, "n_jobs": -1},
-        "seed_param": "random_state",
-    },
-    "xgb": {
-        "model_class": XGBClassifier,
-        "params": {"n_estimators": 200, "max_depth": 5, "eval_metric": "logloss", "verbosity": 0},
-        "seed_param": "random_state",
-    },
-    "lgbm": {
-        "model_class": LGBMClassifier,
-        "params": {"n_estimators": 200, "max_depth": 5, "verbose": -1},
-        "seed_param": "random_state",
-    },
+    "rf":   {"model_class": RandomForestClassifier,
+             "params": {"n_estimators": 200, "max_depth": 5, "n_jobs": -1},
+             "seed_param": "random_state"},
+    "xgb":  {"model_class": XGBClassifier,
+             "params": {"n_estimators": 200, "max_depth": 5, "eval_metric": "logloss", "verbosity": 0},
+             "seed_param": "random_state"},
+    "lgbm": {"model_class": LGBMClassifier,
+             "params": {"n_estimators": 200, "max_depth": 5, "verbose": -1},
+             "seed_param": "random_state"},
 }
 
 voter = InteractionVoter(configs, n_seeds=200, alpha=0.05, n_jobs=4)
 vote_results = voter.vote(X, y, top_pairs)
 
-# Summary table
 summary = voter.summary(vote_results)
 print(summary[["Feature_i", "Feature_j", "Votes", "Vote_Ratio", "Unanimous", "Mean_AUC"]])
 
-# Heatmap: AUC by algorithm, * marks robust interactions
-voter.plot_vote_heatmap(vote_results)
+voter.plot_vote_heatmap(vote_results)   # requires predykt[plot]
 ```
 
 Unanimous interactions (all algorithms agree) are the most reliable candidates for feature engineering or regulatory documentation.
@@ -184,7 +173,6 @@ from predykt import SeedRobustnessValidator
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=999)
 
-# The HP config you want to validate (found via HPO)
 hp_config = {"n_estimators": 200, "max_depth": 6, "min_samples_split": 10}
 
 def eval_fn(seed: int) -> float:
@@ -197,31 +185,31 @@ validator = SeedRobustnessValidator(
     n_seeds=100,
     metric_name="AUC",
     higher_is_better=True,
-    sigma_max=0.005,  # domain-informed: 0.5% AUC std is acceptable for production
+    sigma_max=0.005,   # domain-informed: 0.5% AUC std acceptable for production
 )
 
 report = validator.run()
 validator.print_report(report)
-validator.plot_diagnostics(report)
+validator.plot_diagnostics(report)   # requires predykt[plot]
 ```
 
 **Statistical tests applied:**
 
-| Test | Purpose |
-|------|---------|
-| Shapiro-Wilk | Gates parametric vs bootstrap path |
-| Chi-square variance test (one-sided upper) | H0: sigma^2 <= sigma^2_max |
-| 95/95 Tolerance interval | 95% confidence that 95% of future seed runs fall within [L, U] |
-| Bootstrap CI for std | Non-parametric fallback when normality is violated |
-| Coefficient of Variation | Relative dispersion summary |
+| Test                                       | Purpose                                                        |
+| ------------------------------------------ | -------------------------------------------------------------- |
+| Shapiro-Wilk                               | Gates parametric vs bootstrap path                             |
+| Chi-square variance test (one-sided upper) | H₀: σ² ≤ σ²_max                                                |
+| 95/95 Tolerance interval                   | 95% confidence that 95% of future seed runs fall within [L, U] |
+| Bootstrap CI for std                       | Non-parametric fallback when normality is violated             |
+| Coefficient of Variation                   | Relative dispersion summary                                    |
 
 **Verdict categories:** `ROBUST` / `MARGINAL` / `UNSTABLE`
 
-> **Note on `sigma_max`:** If not set, defaults to 1% of the observed mean, a conservative auto-default. You should override this with a domain-informed threshold. In credit scoring, 0.5% AUC std (`sigma_max=0.005`) is a reasonable production stability requirement.
+> **Note on `sigma_max`:** if not set, defaults to 1% of the observed mean, a conservative auto-default. Override it with a domain-informed threshold. In credit scoring, 0.5% AUC std (`sigma_max=0.005`) is a reasonable production stability requirement.
 
 ### 5. Feature Binning IV Uplift
 
-Quick screening for feature pair interactions using OptBinning's 2D binning. The uplift heuristic (`IV_2D - (IV_1 + IV_2)`) identifies pairs where joint information exceeds the sum of marginal information, a signal worth investigating further.
+Quick screening for feature pair interactions using OptBinning's 2D binning. The uplift heuristic (`IV_2D - (IV_1 + IV_2)`) identifies pairs where joint information exceeds the sum of marginal information — a signal worth investigating further.
 
 ```python
 from predykt import FeatureBinningAnalyzer
@@ -237,20 +225,20 @@ feature_pairs = [
 results = analyzer.analyze_feature_combinations(feature_pairs)
 print(analyzer.get_top_combinations())
 
-# Inspect 2D binning table for a specific pair
 table = analyzer.get_binning_details("age", "income")
 print(table)
 ```
 
-> **Interpretation note:** The IV uplift measure is a screening heuristic, not a formal interaction test. Pairs with high uplift are candidates for the more rigorous `InteractionTester` / `InteractionVoter` pipeline.
+> **Interpretation note:** IV uplift is a screening heuristic, not a formal interaction test. High-uplift pairs are candidates for the more rigorous `InteractionTester` / `InteractionVoter` pipeline.
 
 ### 6. Residual Representation Testing
 
-After confirming an interaction pair is stable, `ResidualRepresentationTester` answers: does a specific engineered transformation of that pair explain structure the base model missed?
+After confirming an interaction pair is stable, `ResidualRepresentationTester` asks: does a specific engineered transformation of that pair explain structure the base model missed?
 
-The test uses the Frisch-Waugh-Lovell theorem. Stage 1 computes out-of-fold residuals Ỹ = y - p̂ via K-fold cross-fitting. Stage 2 regresses Ỹ on the candidate feature Tk and tests H0: beta1 = 0. A significant result means Tk captures signal the base model failed to learn.
+The test uses the Frisch–Waugh–Lovell theorem. Stage 1 computes out-of-fold residuals Ỹ = y − p̂ via K-fold cross-fitting. Stage 2 regresses Ỹ on the candidate feature Tₖ and tests H₀: β₁ = 0. **A significant result provides evidence that Tₖ captures structure the base model did not** — it is a screening signal, not a proof of causal necessity.
 
 ```python
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 from predykt import ResidualRepresentationTester, OLSEstimator, HSICEstimator
@@ -269,33 +257,30 @@ tester = ResidualRepresentationTester(
     alpha=0.05,
 )
 
-tester.fit(
-    feature_pairs=[("age", "income")],
-    X=X,
-    y=y,
-    representations=reps,
-)
+tester.fit(feature_pairs=[("age", "income")], X=X, y=y, representations=reps)
 
-# Summary table: beta, t-stat, p-value, BH-corrected p-value, winner flag
+# Summary table: beta, statistic, p-value, BH-corrected p-value, winner flag
 print(tester.results_to_dataframe())
 
 # Best representation per pair
 winners = tester.winning_representations()
 
-# Add placebo and bootstrap refutation checks
+# Placebo + bootstrap refutation checks -> populates the `robust` column
 tester.refute(n_permutations=100, n_bootstrap=50)
 print(tester.results_to_dataframe()[["representation", "rejected", "robust"]])
 ```
 
+> **Multiple testing:** BH correction (`pvalue_bh`) controls the false discovery rate **within each pair's set of representations**, not across many pairs screened in one run. When you test hundreds of pairs, treat the output as a ranked screen and apply a family-wide correction (or the `refute` step) before drawing firm conclusions.
+
 **Criteria:**
 
-| Criterion | What it tests |
-|-----------|--------------|
-| `OLSEstimator` | Linear association (HC3 robust SE, handles heteroskedastic residuals) |
-| `HSICEstimator` | Nonlinear / non-monotone dependence (kernel-based, permutation p-value) |
-| `CustomEstimator` | Any user-supplied callable returning a `Stage2Result` |
+| Criterion         | What it tests                                                           |
+| ----------------- | ----------------------------------------------------------------------- |
+| `OLSEstimator`    | Linear association (HC3 robust SE, handles heteroskedastic residuals)   |
+| `HSICEstimator`   | Nonlinear / non-monotone dependence (kernel-based, permutation p-value) |
+| `CustomEstimator` | Any user-supplied callable returning a `Stage2Result`                   |
 
-**Precomputed residuals (Mode B):** If you already have OOF residuals from a prior run, pass `Y_resid=` directly to skip the Stage 1 cross-fitting.
+**Precomputed residuals (Mode B):** if you already have OOF residuals, pass `Y_resid=` to skip Stage 1 cross-fitting.
 
 ```python
 tester.fit(
@@ -304,6 +289,20 @@ tester.fit(
     representations=reps,
     Y_resid=precomputed_residuals,
 )
+```
+
+**Native-categorical models (adapters):** to cross-fit a CatBoost / LightGBM / XGBoost model with categorical columns, wrap it in an adapter so fit/predict dtype handling is applied consistently across folds.
+
+```python
+from catboost import CatBoostClassifier
+from predykt import ResidualRepresentationTester, CatBoostAdapter
+
+adapter = CatBoostAdapter(
+    CatBoostClassifier(iterations=200, depth=5, verbose=0),
+    cat_cols=["state", "segment"],
+)
+tester = ResidualRepresentationTester(model=adapter, n_folds=5)
+tester.fit(feature_pairs=[("age", "income")], X=X, y=y, representations=reps)
 ```
 
 ### 7. SHAP Interaction Analyzer
@@ -322,47 +321,44 @@ groups = {
 analyzer = SHAPInteractionAnalyzer(interaction_groups=groups, layers=[1, 2, 3])
 analyzer.fit(model=fitted_model, X=X_test)
 
-# Layer 1: group total SHAP (sum within group)
-l1 = analyzer.layer_1_group_total()
+l1 = analyzer.layer_1_group_total()        # sum within group
+l2 = analyzer.layer_2_net_group_effects()  # Layer 1 minus cross-group interactions
+l3 = analyzer.layer_3_pure_main_effects()  # diagonal of shap_interaction_values
 
-# Layer 2: net group effects (Layer 1 minus cross-group interaction contributions)
-l2 = analyzer.layer_2_net_group_effects()
-
-# Layer 3: pure main effects per feature (diagonal of shap_interaction_values)
-l3 = analyzer.layer_3_pure_main_effects()
-
-# Global importance summary for each layer
 print(analyzer.summary(layer=1))
 print(analyzer.summary(layer=2))
 
-# Side-by-side comparison: layer_1 vs layer_2 per group
 group_comparison, feature_effects = analyzer.compare_layers()
 print(group_comparison)
 ```
 
 **Reading the layers:**
 
-| Comparison | What it tells you |
-|------------|------------------|
-| Layer 1 - Layer 2 per group | How much of the group's apparent importance comes from cross-group interactions |
-| Layer 2 - sum(Layer 3 within group) | Within-group collinearity aliasing even after cross-group correction |
+| Comparison                          | What it tells you                                                               |
+| ----------------------------------- | ------------------------------------------------------------------------------- |
+| Layer 1 − Layer 2 per group         | How much of the group's apparent importance comes from cross-group interactions |
+| Layer 2 − Σ(Layer 3 within group)   | Within-group collinearity aliasing even after cross-group correction            |
 
 ## Design Decisions
 
-**Why refit across seeds instead of permuting on a fixed model?**
-Permutation tests on a fixed model test whether the interaction is non-zero for that fit. Refitting tests whether the interaction is a stable property of the model family on this data, which is what matters for deployment. See the `InteractionTester` docstring for the full discussion.
+**Why refit across seeds instead of permuting on a fixed model?** Permutation tests on a fixed model test whether the interaction is non-zero for that fit. Refitting tests whether the interaction is a stable property of the model family on this data, which is what matters for deployment. See the `InteractionTester` docstring for the full discussion.
 
-**Why Numba for CyclicalBinner?**
-Exhaustive enumeration of all k-partitions of a circular domain of cardinality m is O(C(m, k)) per k. For m=24, k=6, that's C(24,6) = 134,596 partitions. Numba JIT brings this from seconds to milliseconds.
+**Why Numba for CyclicalBinner?** Exhaustive enumeration of all k-partitions of a circular domain of cardinality m is O(C(m, k)) per k. For m=24, k=6 that's C(24,6) = 134,596 partitions. Numba JIT brings this from seconds to milliseconds. The method is univariate and binary-target only; it is designed for low-cardinality circular domains (hours, months), not high-cardinality fields.
 
-**Why the 95/95 tolerance interval in SeedRobustnessValidator?**
-A confidence interval on the mean tells you where the average seed lands. A tolerance interval tells you where individual seed runs land, which is what matters when you're deploying a model trained on a single seed. The 95/95 interval is the ISO 16269-6 standard for this use case.
+**Why the 95/95 tolerance interval in SeedRobustnessValidator?** A confidence interval on the mean tells you where the average seed lands. A tolerance interval tells you where individual seed runs land — which is what matters when you deploy a model trained on a single seed. The 95/95 interval follows the ISO 16269-6 convention for this use case.
 
-**Why HC3 robust standard errors in OLSEstimator?**
-For binary targets, residuals Ỹ = y - p̂ have observation-specific variance p̂(1-p̂). OLS with homoskedastic standard errors is misspecified. HC3 (MacKinnon & White 1985) corrects this and is the mandatory default.
+**Why HC3 robust standard errors in OLSEstimator?** For binary targets, residuals Ỹ = y − p̂ have observation-specific variance p̂(1−p̂). OLS with homoskedastic standard errors is misspecified. HC3 (MacKinnon & White 1985) corrects this and is the default.
 
-**Why HSIC alongside OLS?**
-OLS only detects linear association. HSIC (Hilbert-Schmidt Independence Criterion) is a kernel-based nonparametric test that detects any dependence structure, including nonlinear and non-monotone relationships. Running both gives a more complete picture of whether a representation carries signal.
+**Why HSIC alongside OLS?** OLS only detects linear association. HSIC (Hilbert–Schmidt Independence Criterion) is a kernel-based nonparametric test that detects any dependence structure, including nonlinear and non-monotone relationships. Running both gives a more complete picture of whether a representation carries signal.
+
+## Testing
+
+```bash
+pip install -e ".[test,plot]"
+pytest -q
+```
+
+CI runs the suite on Python 3.10 / 3.11 / 3.12 on every push.
 
 ## License
 
