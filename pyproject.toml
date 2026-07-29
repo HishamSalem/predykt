@@ -48,8 +48,14 @@ Issues = "https://github.com/HishamSalem/predykt/issues"
 # No version string lives in any file; tag the release and build.
 [tool.setuptools_scm]
 version_file = "predykt/_version.py"
-# Untagged builds would otherwise resolve to a PEP 440 local version
-# (0.1.devN+g<hash>), which the PyPI upload API rejects outright.
+# Engages only when setuptools-scm cannot detect a version at all — i.e. when
+# there is no .git (building from an sdist or a downloaded zip), which would
+# otherwise raise LookupError and fail the build outright.
+#
+# It does NOT suppress the PEP 440 local segment on an untagged git checkout:
+# such a build still resolves to 0.0.0.devN+g<hash>, which the PyPI upload API
+# rejects. That rejection is a deliberate safety net, not a bug — the fix is to
+# tag before building (see CONTRIBUTING.md), not to strip the local segment.
 fallback_version = "0.0.0.dev0"
 
 [tool.setuptools.packages.find]
