@@ -113,5 +113,16 @@ in `README.md` at `ffd82dd`: `grep -n "1.1803\|0.1495" README.md` returns nothin
 also no prose in the README that assumes a WOE sign.
 
 Substituted action: added an explicit convention note to README §1 stating
-ln(%non-event / %event) and its optbinning consistency, which is the substance the task
-was after.
+ln(%non-event / %event) and its optbinning consistency, plus a breaking-change callout,
+which is the substance the task was after.
+
+## Task 2 — `summary()`'s per-bin `iv` column never summed to `iv_raw` (pre-existing)
+
+Found while writing the acceptance test. `BinningResult.summary()` computes each bin's `iv`
+as `(q−p)·woe[j]` using *unsmoothed* p/q but the *Laplace-smoothed* `woe_`, so the column
+sums to neither `iv_raw` nor `iv_smoothed`. On the README's fixture the gap is small
+(0.4010369 vs 0.4010618); on a fixture with `lam=0.5` and small bins it reaches ~0.15%.
+
+Pre-existing and unrelated to the sign flip — visible in the pre-flip snapshot — and no
+task authorises changing `summary()`'s output, so it is left alone. The acceptance test
+asserts per-bin positivity and only a loose match to `iv_raw`. Flagged for the owner.

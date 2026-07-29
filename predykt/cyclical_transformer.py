@@ -6,10 +6,14 @@ Scikit-learn compatible transformer for IV-maximizing cyclical binning.
 
 Usage:
     from cyclical_binner import CyclicalBinner
-    
+
     binner = CyclicalBinner(gamma=0.02, k_max=6)
     binner.fit(temporal_values, targets)
     binned = binner.transform(temporal_values)
+
+WOE convention: ln(%non-event / %event), matching optbinning and hence
+predykt.feature_binning. See CyclicalBinner's Notes for the details and for the
+0.2.0 sign change.
 """
 
 import numpy as np
@@ -89,6 +93,10 @@ def _solve_for_k(
             
             p_j = (e_count + lam) / denom_p
             q_j = (ne_count + lam) / denom_q
+            # Self-contained and already sign-invariant: (p−q)·ln(p/q) equals
+            # (q−p)·ln(q/p). Do NOT "flip to match the WOE convention" — this
+            # drives the best_iv_reg argmax, and a one-sided flip would invert
+            # it and silently change which partition is selected.
             iv += (p_j - q_j) * np.log(p_j / q_j)
         
         if is_valid:
@@ -168,7 +176,18 @@ def _assign_bins(values: np.ndarray, splits: np.ndarray, m: int) -> np.ndarray:
 
 @dataclass
 class BinningResult:
-    """Container for binning results."""
+    """Container for binning results.
+
+    WOE convention: ln(%non-event / %event), matching optbinning
+    (Navas-Palencia 2020, arXiv:2001.08025 §2.1) and Siddiqi, *Credit Risk
+    Scorecards*. WOE is therefore inversely related to the event rate: bins
+    with an above-average event rate get negative WOE.
+
+    IV is unaffected by the convention. Each contribution is written
+    (q − p)·ln(q/p), which equals (p − q)·ln(p/q); both factors carry the sign,
+    so `iv_raw`, `iv_smoothed` and the per-bin `iv` column of `summary()` are
+    positive under either convention.
+    """
     split_points: np.ndarray
     k: int
     iv_raw: float
@@ -208,7 +227,9 @@ class BinningResult:
             
             p_j = self.event_counts[j] / total_events
             q_j = self.non_event_counts[j] / total_non_events
-            iv_j = (p_j - q_j) * self.woe[j]
+            # (q − p) pairs with woe = ln(q/p); both factors flipped, so iv_j is
+            # unchanged and positive. Flipping only one would negate it.
+            iv_j = (q_j - p_j) * self.woe[j]
             
             rows.append({
                 'bin': j,
@@ -332,10 +353,28 @@ class CyclicalBinner(BaseEstimator, TransformerMixin):
         
     woe_ : np.ndarray
         Weight of Evidence for each bin.
-        
+
     iv_ : float
         Information Value (raw, unsmoothed).
-    
+
+    Notes
+    -----
+    WOE convention: ln(%non-event / %event), matching optbinning
+    (Navas-Palencia 2020, arXiv:2001.08025 §2.1) and Siddiqi, *Credit Risk
+    Scorecards*. WOE is inversely related to the event rate — a bin with an
+    above-average event rate gets a negative WOE.
+
+    Both sign conventions are in active circulation in the credit-risk
+    literature, so this is not a claim about which one is standard. The point
+    is intra-package consistency: `FeatureBinningAnalyzer` delegates to
+    optbinning directly, and mixing the two conventions inside one scorecard
+    silently sign-flips whichever features came from the odd one out.
+
+    CHANGED IN 0.2.0: `woe_`, `get_woe_encoder()`, `transform_woe()` and
+    `result_.woe_table()` return the opposite sign to <= 0.1.2. A scorecard
+    fitted on <= 0.1.2 must be refit, or its coefficients negated. IV is
+    unchanged.
+
     Examples
     --------
     >>> binner = CyclicalBinner(m=24, gamma=0.02)
@@ -445,14 +484,20 @@ class CyclicalBinner(BaseEstimator, TransformerMixin):
         for j in range(best_k):
             p_j = (event_counts[j] + self.lam) / denom_p
             q_j = (non_event_counts[j] + self.lam) / denom_q
-            woe[j] = np.log(p_j / q_j)
-            iv_smooth += (p_j - q_j) * woe[j]
+            # ln(%non-event / %event) — see the class docstring on convention.
+            woe[j] = np.log(q_j / p_j)
+            # The (q − p) factor flips with the WOE sign so that IV is unchanged.
+            # IV = Σ(p−q)·ln(p/q) is invariant only if BOTH factors flip; flipping
+            # woe alone would silently negate iv_smoothed.
+            iv_smooth += (q_j - p_j) * woe[j]
         
         iv_raw = 0.0
         for j in range(best_k):
             p_j = event_counts[j] / total_events
             q_j = non_event_counts[j] / total_non_events
             if p_j > 0 and q_j > 0:
+                # Self-contained: (p−q)·ln(p/q) == (q−p)·ln(q/p), so this is
+                # already invariant to the WOE convention. Left as-is.
                 iv_raw += (p_j - q_j) * np.log(p_j / q_j)
         
         self.woe_ = woe
@@ -507,7 +552,8 @@ class CyclicalBinner(BaseEstimator, TransformerMixin):
         Returns
         -------
         dict
-            Mapping from bin index to WOE value.
+            Mapping from bin index to WOE value, using the
+            ln(%non-event / %event) convention (see class Notes).
         """
         check_is_fitted(self, ['woe_', 'n_bins_'])
         return {i: float(self.woe_[i]) for i in range(self.n_bins_)}
@@ -524,7 +570,8 @@ class CyclicalBinner(BaseEstimator, TransformerMixin):
         Returns
         -------
         X_woe : ndarray of shape (n_samples,)
-            WOE value for each sample.
+            WOE value for each sample, using the ln(%non-event / %event)
+            convention (see class Notes). Sign is opposite to predykt <= 0.1.2.
         """
         check_is_fitted(self, ['woe_'])
         bins = self.transform(X)

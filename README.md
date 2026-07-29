@@ -81,6 +81,10 @@ woe_encoded = binner.transform_woe(hours)   # WOE directly (for LR scorecards)
 woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 ```
 
+**WOE sign convention:** `ln(%non-event / %event)`, matching [optbinning](https://github.com/guillermo-navas-palencia/optbinning) (Navas-Palencia 2020, §2.1) and Siddiqi's *Credit Risk Scorecards*. WOE is inversely related to the event rate, so a bin with an above-average event rate gets a **negative** WOE. Both conventions circulate in the credit-risk literature; the reason to pin one is that `FeatureBinningAnalyzer` delegates to optbinning directly, and mixing conventions inside a single scorecard silently sign-flips whichever features came from the odd one out. Information Value is unaffected — it is symmetric in the two factors.
+
+> ⚠️ **Breaking change in 0.2.0.** `transform_woe()`, `get_woe_encoder()`, `woe_` and `result_.woe_table()` return the **opposite sign** to predykt ≤ 0.1.2, which used `ln(%event / %non-event)`. A scorecard fitted with `CyclicalBinner` WOE on ≤ 0.1.2 must be refit, or its coefficients on those features negated. `iv_`, `iv_smoothed` and the `iv` column of `summary()` are unchanged.
+
 ### 2. SHAP Interaction Stability Testing
 
 A SHAP interaction from a single model fit conflates a real data relationship with random seed luck. `InteractionTester` refits the model across N seeds and measures whether the interaction is a stable property.
