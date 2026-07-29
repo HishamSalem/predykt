@@ -57,6 +57,53 @@ installed but unbuilt, the version comes from `importlib.metadata`, not from
 
 ---
 
+## Task 1 — the claimed 43.7× per-permutation speedup does not reproduce (the ~15s target does)
+
+Measured on this machine, same script before and after:
+
+| n | before | after | speedup |
+|---|---|---|---|
+| 1000 | 38.45 ms/perm | 8.49 ms/perm | 4.5× |
+| 2000 | 182.32 ms/perm | 37.24 ms/perm | 4.9× |
+
+The fix list quoted 1266 ms/perm at n=2000 before, and 43.7×. The *after* figures agree
+(1266/43.7 ≈ 29 ms vs 37 ms measured); the *before* figures differ by ~7×. The baseline is
+three n×n matrix products, so its wall time is set almost entirely by how many threads the
+installed BLAS uses — 182 ms at n=2000 is ~264 GFLOPS, 1266 ms is ~38 GFLOPS, i.e. the fix
+list's baseline looks effectively single-threaded. The ratio is a property of the
+measuring machine, not of the change.
+
+The headline acceptance criterion does hold: **n=2000 × 500 permutations, 17.0 s** end to
+end (fix list said ~15 s), against a 91 s projection for the baseline's permutation loop
+alone — and that projection excludes the baseline's per-permutation O(n³) centering, so the
+true baseline is far worse.
+
+Reporting 4.9× rather than 43.7×. The machine-independent claim is the order reduction:
+O(n³) per permutation → O(n²) per permutation, with the O(n³) setup removed as well.
+
+## Task 1 — items 3 and 4 of the task partly cancel each other
+
+Item 3 says to center both matrices outside the loop and permute the already-centered `Lc`.
+Item 4 says only one matrix needs centering. Taking item 4 makes item 3's mechanism moot:
+the matrix that gets centered (`K`) is the one that is never permuted, so there is no
+"permute the centered matrix" step left to justify. Implemented as `Kc = _center(K)` hoisted
+out of the loop, with the raw `L` permuted inside it.
+
+Both exactness arguments are still documented on `_hsic_from_centered`, because a reader
+will ask why centering can be hoisted at all — idempotency of H for dropping L's centering,
+and `PᵀHP = H` for the permutation commuting with centering.
+
+## Task 1 — `_center` as literally specified would have kept the O(n³) cost
+
+The task specifies `_center(M)` as "`H @ M @ H` with `H = I − 11ᵀ/n`". Building `H` and
+evaluating that expression is two n×n matrix products, i.e. O(n³) — so hoisting it out of
+the permutation loop would still leave an O(n³) term dominating `fit`, contradicting the
+task's own title ("O(n²) instead of O(n³)"). Implemented instead by the equivalent
+mean-subtraction identity `HMH = M − colmeans − rowmeans + grandmean`, which is O(n²).
+`tests/test_criteria.py::test_center_matches_explicit_HMH` pins it to the explicit form.
+
+---
+
 ## Task 2 — README §1 has no WOE example output table
 
 The fix list said to update "the example output table's `woe` column" in README §1 and

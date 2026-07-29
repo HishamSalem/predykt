@@ -14,6 +14,7 @@ HC3 is mandatory (not optional) for binary classification residuals because
 Var(Ỹᵢ) = p̂ᵢ(1 − p̂ᵢ), observation-specific, never constant.
 """
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -35,12 +36,68 @@ def _rbf_kernel(x: np.ndarray, bandwidth: Optional[float]) -> np.ndarray:
     return np.exp(-dists_sq / (2.0 * bandwidth ** 2))
 
 
+# n above which HSIC's O(n²) memory and time are worth warning about.
+# Module-level so tests can lower it without allocating a 5000x5000 Gram matrix.
+_HSIC_LARGE_N_WARN = 5000
+
+
+def _center(M: np.ndarray) -> np.ndarray:
+    """
+    Double-center a Gram matrix: HMH with H = I − 11ᵀ/n.
+
+    Computed by mean subtraction rather than as two matrix products. Expanding
+    the definition gives an exactly equivalent O(n²) form:
+
+        HMH = M − (1/n)11ᵀM − (1/n)M11ᵀ + (1/n²)11ᵀM11ᵀ
+            = M − colmeans − rowmeans + grandmean
+
+    Forming H explicitly and evaluating ``H @ M @ H`` would cost two n×n
+    matrix products, i.e. O(n³) — which would dominate everything else in
+    HSICEstimator.fit even when centering is hoisted out of the permutation
+    loop. Same values, one order cheaper.
+    """
+    return (
+        M
+        - M.mean(axis=0, keepdims=True)
+        - M.mean(axis=1, keepdims=True)
+        + M.mean()
+    )
+
+
 def _hsic_statistic(K: np.ndarray, L: np.ndarray) -> float:
-    n = K.shape[0]
-    H = np.eye(n) - np.ones((n, n)) / n
-    Kc = H @ K @ H
-    Lc = H @ L @ H
-    return float(np.trace(Kc @ Lc) / (n - 1) ** 2)
+    """
+    Biased HSIC estimator tr(KHLH)/(n−1)² (Gretton et al. 2005).
+
+    Two exact simplifications keep this O(n²) rather than O(n³):
+
+    * Only one matrix is centered. H is idempotent (HH = H) and trace is
+      invariant under cyclic permutation, so
+      tr((HKH)(HLH)) = tr(HKH·L), i.e. centering both is redundant.
+    * The trace of the product is read off as an elementwise sum,
+      ``np.sum(Kc * L)``, since both matrices are symmetric. This avoids
+      materialising an n×n matmul just to sum its diagonal.
+
+    Neither step is an approximation.
+    """
+    return _hsic_from_centered(_center(K), L)
+
+
+def _hsic_from_centered(Kc: np.ndarray, L: np.ndarray) -> float:
+    """
+    HSIC from an already-centered Kc and an uncentered L.
+
+    Lets the permutation loop in HSICEstimator.fit hoist the centering out,
+    paying it once instead of once per permutation. Exact, for two reasons:
+
+    * H is idempotent, so tr(Kc·(HLH)) = tr(Kc·L) — L never needs centering
+      as long as Kc is centered.
+    * Permutation matrices commute with centering:
+      PᵀHP = PᵀP − (1/n)Pᵀ11ᵀP = I − (1/n)11ᵀ = H, hence
+      Pᵀ(HLH)P = H(PᵀLP)H. So permuting L and then centering gives the same
+      statistic as centering and then permuting.
+    """
+    n = Kc.shape[0]
+    return float(np.sum(Kc * L) / (n - 1) ** 2)
 
 
 # =============================================================================
@@ -231,6 +288,32 @@ class HSICEstimator(Stage2Estimator):
     beta and t_stat are both set to the raw HSIC statistic (scale depends on
     bandwidth and n). They are comparable across representations fitted with
     the same criterion instance but not across different datasets or bandwidths.
+
+    Primary reference: Gretton, A., Bousquet, O., Smola, A. & Schölkopf, B.
+    (2005), "Measuring Statistical Dependence with Hilbert-Schmidt Norms",
+    ALT 2005. The permutation null follows Gretton et al. (2008), "A Kernel
+    Statistical Test of Independence", NIPS 2008.
+
+    SCALING:
+        Each permutation is O(n²) in both time and memory: two n×n Gram
+        matrices are materialised, and every permutation does an n×n
+        elementwise product. Centering is hoisted out of the permutation loop
+        and computed by mean subtraction, so no step is O(n³). Measured on one
+        machine, n=2000 with n_permutations=500 takes ~17s end to end, at
+        ~34ms per permutation; cost grows quadratically in n from there.
+
+        This is fine into the low thousands but is not suitable much past
+        n ≈ 10⁴. Two standard routes past that, neither implemented here
+        (roadmap items):
+
+        * The gamma approximation to the null (Gretton et al. 2008) replaces
+          the permutation loop with a two-moment fit, turning n_permutations
+          model passes into one. This is the cheaper and more directly
+          applicable of the two for this codebase.
+        * Block / Nyström HSIC (Zhang, Q., Filippi, S., Gretton, A. &
+          Sejdinovic, D. (2018), "Large-scale kernel methods for independence
+          testing", Statistics and Computing 28:113-130) trades a little power
+          for near-linear scaling, and is the standard choice at large n.
     """
 
     def __init__(
@@ -249,9 +332,24 @@ class HSICEstimator(Stage2Estimator):
         T_k = np.asarray(T_k, dtype=float).ravel()
         Y_resid = np.asarray(Y_resid, dtype=float).ravel()
 
+        n = len(Y_resid)
+        if n > _HSIC_LARGE_N_WARN and self.n_permutations > 0:
+            warnings.warn(
+                f"HSIC on n={n} with n_permutations={self.n_permutations} builds "
+                f"{n}x{n} Gram matrices and is O(n^2) per permutation; expect roughly "
+                f"{self.n_permutations * (n / 2000.0) ** 2 * 0.03:.0f}s. Consider "
+                "subsampling rows, or n_permutations=0 for the statistic alone.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         K = _rbf_kernel(T_k, self.bandwidth)
         L = _rbf_kernel(Y_resid, self.bandwidth)
-        observed = _hsic_statistic(K, L)
+
+        # Centering is hoisted out of the permutation loop below; see
+        # _hsic_from_centered for why that is exact rather than an approximation.
+        Kc = _center(K)
+        observed = _hsic_from_centered(Kc, L)
 
         if self.n_permutations == 0:
             # Informational mode: statistic only, no p-value
@@ -267,8 +365,8 @@ class HSICEstimator(Stage2Estimator):
         rng = np.random.default_rng(self.random_state)
         null = np.empty(self.n_permutations)
         for i in range(self.n_permutations):
-            perm = rng.permutation(len(Y_resid))
-            null[i] = _hsic_statistic(K, L[np.ix_(perm, perm)])
+            perm = rng.permutation(n)
+            null[i] = _hsic_from_centered(Kc, L[np.ix_(perm, perm)])
 
         # +1 conservative correction for finite permutations
         pvalue = float((np.sum(null >= observed) + 1) / (self.n_permutations + 1))
