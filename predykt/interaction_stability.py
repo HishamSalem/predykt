@@ -1,40 +1,115 @@
 """
-SHAP Interaction Stability via Bootstrap Refit Testing
-======================================================
+SHAP Interaction Testing against an Additive Null
+=================================================
 
-Tests whether SHAP interaction values are robust across multiple model
-fits with varied random seeds, then validates across algorithm families.
-
-Replaces the permutation-on-fixed-model approach (which tests the wrong
-null hypothesis) with a refit-across-seeds approach that tests whether
-the interaction is a stable property of the model, not an artifact of
-a single random seed.
+Tests whether a feature pair's SHAP interaction is larger than what an
+additive data-generating process would produce, then validates across
+algorithm families.
 
 Core idea:
-    - A real interaction should be stable across random seeds (instability_score)
-    - A real interaction should have predictive power (per-interaction AUC)
-    - A real interaction should appear across multiple algorithms (vote)
+    - Measure the interaction magnitude mean|Φ_ij| over rows.
+    - Compare it against a null reference distribution simulated from an
+      ADDITIVE surrogate fitted to the same data (p_value, `robust`).
+    - Quantify its precision with a row bootstrap (ci_low, ci_high).
+    - Confirm it appears across multiple algorithms (InteractionVoter).
 
-NOTE: This procedure tests *algorithmic stability*: whether a given
-interaction persists regardless of model randomness (seed, subsampling,
-initialization). It does NOT test statistical significance in the
-frequentist sense (i.e., it does not test against a null derived from
-the data-generating process). The instability_score quantifies how
-often the interaction's sign flips across seeds; lower values indicate
-a more robust interaction.
+The null follows the design in Friedman, J.H. & Popescu, B.E. (2008),
+"Predictive Learning via Rule Ensembles", Annals of Applied Statistics
+2(3):916-954, §8, where the H-statistic's reference distribution is obtained by
+simulating outcomes from a fitted model stripped of the interaction being
+tested. Here: fit depth-1 (additive by construction) stumps to (X, y), draw
+y* ~ Binomial(1, p_additive), refit the real model class on (X, y*), and
+recompute mean|Φ_ij|. Repeating gives the distribution of interaction magnitude
+attributable to noise and to the estimator's own bias, against which the
+observed magnitude is scored.
+
+CALIBRATION LIMIT — read this before quoting the p-value:
+    The surrogate is an *approximation* to the additive null, not the true
+    null. Depth-1 stumps can only represent additive structure, which is the
+    property that matters, but they need not recover the true additive
+    component of the DGP. The p-value is therefore calibrated only insofar as
+    the surrogate approximates the additive part of the data. Treat it as a
+    principled screen with a real null, not as an exact test.
+
+What changed in 0.2.0:
+    Earlier versions reported an `instability_score`: the proportion of seeds
+    on which the signed mean interaction flipped direction. It had no power at
+    all under a deterministic learner — with XGBoost at subsample=1.0 every
+    seed produces a bit-identical fit, so the score was exactly 0 for every
+    pair including pure noise, and `robust` was True for everything. The
+    statistic was also signed, and SHAP interaction values are roughly
+    sign-symmetric across rows, so the signed mean discarded ~95% of the
+    magnitude it was meant to measure. Both the statistic and the decision
+    rule are replaced; see CHANGELOG.
 """
+
+import inspect
+import multiprocessing
+import warnings
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import shap
+from joblib import Parallel, delayed
 from sklearn.metrics import roc_auc_score
 from statsmodels.stats.multitest import multipletests
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
-from joblib import Parallel, delayed
 from tqdm import tqdm
-import shap
-import warnings
-import multiprocessing
+
+# Depth parameter names in rough order of preference. A depth of 1 makes any
+# tree ensemble additive by construction, which is what the null requires.
+_DEPTH_PARAM_NAMES = ("max_depth", "depth")
+
+
+def _resolve_depth_param(model_class, base_params: dict) -> Optional[str]:
+    """
+    Name of the depth hyperparameter for model_class, or None if it has none.
+
+    Checks base_params first so an explicitly-set depth key is the one that
+    gets overridden — setting a second alias alongside it (CatBoost accepts
+    both ``depth`` and ``max_depth``) would be rejected as a duplicate.
+
+    Signature inspection alone is not sufficient: XGBClassifier.__init__
+    declares only three explicit parameters and absorbs the rest through
+    **kwargs, so ``max_depth`` is invisible to inspect. When a class accepts
+    **kwargs and declares no depth parameter explicitly, "max_depth" is assumed
+    (it is by far the most common name, and XGBoost's).
+    """
+    for name in _DEPTH_PARAM_NAMES:
+        if name in base_params:
+            return name
+    try:
+        params = inspect.signature(model_class.__init__).parameters
+    except (TypeError, ValueError):
+        return None
+    for name in _DEPTH_PARAM_NAMES:
+        if name in params:
+            return name
+    accepts_kwargs = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return "max_depth" if accepts_kwargs else None
+
+
+def _shap_interaction_values(model, X: pd.DataFrame, use_gpu: bool = False):
+    """SHAP interaction values as an (n, p, p) array for the positive class."""
+    if use_gpu:
+        try:
+            explainer = shap.explainers.GPUTree(
+                model, X, feature_perturbation="tree_path_dependent",
+            )
+            interactions = explainer(X, interactions=True)
+        except Exception:
+            warnings.warn("GPU explainer failed, falling back to CPU.")
+            interactions = shap.TreeExplainer(model).shap_interaction_values(X)
+    else:
+        interactions = shap.TreeExplainer(model).shap_interaction_values(X)
+
+    # Binary classifiers may return one array per class
+    if isinstance(interactions, list):
+        interactions = interactions[1]
+    return interactions
 
 
 # =============================================================================
@@ -47,26 +122,45 @@ class InteractionResult:
 
     Attributes
     ----------
-    instability_score : float
-        Proportion of seeds where the interaction's sign differs from
-        the majority direction, doubled to form a two-sided score.
-        Range [0, 1]. Lower = more stable. NOT a frequentist p-value.
+    mean_abs_interaction : float
+        Observed mean|Φ_ij| over rows, from a single fit on the real data.
+        Non-negative by construction.
+    std_interaction : float
+        Standard deviation of mean|Φ_ij| across bootstrap replicates.
+    ci_low, ci_high : float
+        2.5 / 97.5 percentiles of the bootstrap distribution of
+        mean|Φ_ij|.
+
+        DESCRIPTIVE ONLY — NOT A DECISION RULE. This is a precision interval
+        on a magnitude, and mean|Φ_ij| is strictly positive for any fitted
+        tree ensemble, so the interval can never contain zero. "ci_low > 0" is
+        a tautology that flags pure noise as robust; it is not a test against
+        a null. Use `p_value` for that.
+    p_value : float
+        (#{null >= observed} + 1) / (n_null + 1) against the additive null.
+        Bounded below by 1/(n_null + 1).
+    null_mean : float
+        Mean of the null distribution, for context on the observed value.
     robust : bool
-        True if instability_score < alpha threshold, indicating the
-        interaction is stable across seeds.
+        True if p_value < alpha. This is the decision rule.
     """
     feature_i: str
     feature_j: str
     algorithm: str
-    mean_interaction: float
+    mean_abs_interaction: float
     std_interaction: float
-    instability_score: float
+    ci_low: float
+    ci_high: float
+    p_value: float
+    null_mean: float
     per_interaction_auc: float
     mean_auc: float
     std_auc: float
-    n_seeds: int
+    n_bootstrap: int
+    n_null: int
     robust: bool
     interaction_distribution: np.ndarray = field(repr=False)
+    null_distribution: np.ndarray = field(repr=False)
     auc_distribution: np.ndarray = field(repr=False)
 
 
@@ -74,8 +168,8 @@ class InteractionResult:
 class VoteResult:
     """Cross-algorithm vote result for a single feature pair.
 
-    A pair receives a vote from an algorithm if it is robust
-    (instability_score < alpha) across that algorithm's seed runs.
+    A pair receives a vote from an algorithm if its interaction magnitude is
+    significant against that algorithm's additive null (p_value < alpha).
     """
     feature_i: str
     feature_j: str
@@ -100,13 +194,12 @@ class VoteResult:
 
 class InteractionTester:
     """
-    Test SHAP interaction stability for a single algorithm by refitting
-    across multiple random seeds and measuring consistency.
+    Test whether a feature pair's SHAP interaction magnitude exceeds what an
+    additive data-generating process would produce.
 
-    This is a *robustness screen*, not a hypothesis test. It answers:
-    "Does this interaction persist regardless of model randomness?"
-    rather than "Is this interaction statistically significant under
-    a formal null distribution?"
+    This is a hypothesis test against a simulated null, not a stability screen.
+    It answers "is this interaction magnitude larger than an additive DGP would
+    yield?" — subject to the calibration limit documented on the module.
 
     Parameters
     ----------
@@ -116,18 +209,42 @@ class InteractionTester:
         Frozen hyperparameters. Must NOT include the random seed param.
     seed_param : str
         Name of the random seed parameter for this model class.
-    n_seeds : int
-        Number of random seeds to fit. Default 200.
-    alpha : float
-        Threshold for instability_score below which an interaction is
-        considered robust.
+    n_bootstrap : int, default=100
+        Row-bootstrap replicates used for the descriptive interval on
+        mean|Φ_ij|. Does not affect `robust`.
+    n_null : int, default=100
+        Replicates drawn from the additive null. The smallest attainable
+        p-value is 1/(n_null + 1), so n_null must be large enough to resolve
+        `alpha`; a warning is emitted when it is not.
+    alpha : float, default=0.05
+        Significance level for the null p-value. `robust` is p_value < alpha.
+    null_surrogate : estimator or None, default=None
+        Additive surrogate used to generate the null. When None, one is built
+        from model_class with its depth parameter set to 1. Pass an explicit
+        unfitted estimator when model_class has no depth parameter (a clear
+        error is raised in that case if this is left None), or when depth-1
+        stumps are a poor additive fit for the data.
+    n_folds : int, default=5
+        Reserved for cross-fitted interaction scoring.
     use_gpu : bool
         Whether to use GPU-accelerated SHAP explainer.
     n_jobs : int
-        Number of parallel jobs for seed fitting. -1 for all cores.
+        Parallel jobs across bootstrap and null replicates. -1 for all cores.
+    random_state : int or None, default=0
+        Seeds the bootstrap resampling and the null outcome draws.
     fit_params : dict, optional
-        Extra keyword arguments forwarded to ``model.fit()`` on every seed
+        Extra keyword arguments forwarded to ``model.fit()`` on every fit
         (e.g. ``{"sample_weight": w}``).
+    n_seeds : int, optional
+        DEPRECATED alias for n_bootstrap. Emits DeprecationWarning.
+
+    Notes
+    -----
+    COST: one fit on the real data, plus n_bootstrap + n_null fits, plus one
+    surrogate fit — each followed by a full SHAP interaction pass, which is the
+    dominant term. At the defaults that is 202 fits per call. All pairs are
+    scored from each pass, so testing more pairs is nearly free; reduce
+    n_bootstrap first if this is too slow, since it does not affect `robust`.
     """
 
     def __init__(
@@ -135,19 +252,39 @@ class InteractionTester:
         model_class,
         base_params: dict,
         seed_param: str = "random_state",
-        n_seeds: int = 200,
+        n_bootstrap: int = 100,
+        n_null: int = 100,
         alpha: float = 0.05,
+        null_surrogate=None,
+        n_folds: int = 5,
         use_gpu: bool = False,
         n_jobs: int = 1,
+        random_state: Optional[int] = 0,
         fit_params: Optional[dict] = None,
+        n_seeds: Optional[int] = None,
     ):
+        if n_seeds is not None:
+            warnings.warn(
+                "n_seeds is deprecated and will be removed in v0.4.0; use "
+                "n_bootstrap instead. The procedure no longer refits across "
+                "seeds — it bootstraps rows for a descriptive interval and "
+                "simulates an additive null for the p-value.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            n_bootstrap = n_seeds
+
         self.model_class = model_class
         self.base_params = base_params
         self.seed_param = seed_param
-        self.n_seeds = n_seeds
+        self.n_bootstrap = n_bootstrap
+        self.n_null = n_null
         self.alpha = alpha
+        self.null_surrogate = null_surrogate
+        self.n_folds = n_folds
         self.use_gpu = use_gpu
         self.n_jobs = multiprocessing.cpu_count() if n_jobs == -1 else n_jobs
+        self.random_state = random_state
         self.fit_params = dict(fit_params or {})
 
         # Validate seed_param not in base_params
@@ -156,6 +293,27 @@ class InteractionTester:
                 f"'{seed_param}' should not be in base_params. "
                 f"It will be set automatically per seed."
             )
+
+        min_p = 1.0 / (n_null + 1)
+        if alpha < min_p:
+            warnings.warn(
+                f"alpha={alpha} is below the smallest attainable p-value "
+                f"1/(n_null+1)={min_p:.4g}, so robust can never be True. "
+                f"Raise n_null to at least {int(np.ceil(1 / alpha)) - 1}.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    @property
+    def n_seeds(self) -> int:
+        """DEPRECATED alias for n_bootstrap."""
+        warnings.warn(
+            "n_seeds is deprecated and will be removed in v0.4.0; "
+            "use n_bootstrap instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.n_bootstrap
 
     @staticmethod
     def _validate_numeric_X(X: pd.DataFrame) -> None:
@@ -167,54 +325,71 @@ class InteractionTester:
                 f"or bool). Non-numeric columns found: {details}"
             )
 
-    def _fit_single_seed(
+    # =========================================================================
+    # BUILDING BLOCKS
+    # =========================================================================
+
+    def _fit_model(self, X: pd.DataFrame, y: np.ndarray, seed: int,
+                   fit_params: Optional[dict] = None):
+        params = {**self.base_params, self.seed_param: seed}
+        model = self.model_class(**params)
+        model.fit(X, y, **(self.fit_params if fit_params is None else fit_params))
+        return model
+
+    def _resampled_fit_params(self, idx: np.ndarray) -> dict:
+        """
+        fit_params with row-aligned entries reindexed to a bootstrap draw.
+
+        Only ``sample_weight`` is handled: it is the one row-aligned fit
+        parameter common to every supported library, and leaving it unpermuted
+        would silently pair each resampled row with another row's weight. Any
+        other row-aligned entry is passed through unchanged and warned about,
+        because fit_params is an open dict and there is no general way to tell
+        a row-aligned array from a scalar hyperparameter.
+        """
+        fp = dict(self.fit_params)
+        n = len(idx)
+        if "sample_weight" in fp and fp["sample_weight"] is not None:
+            fp["sample_weight"] = np.asarray(fp["sample_weight"])[idx]
+        for key, val in fp.items():
+            if key == "sample_weight":
+                continue
+            if isinstance(val, (np.ndarray, pd.Series, list)) and len(val) == n:
+                warnings.warn(
+                    f"fit_params['{key}'] looks row-aligned (length {n}) but is "
+                    "not resampled with the bootstrap draw; only sample_weight "
+                    "is. Results for this replicate may pair rows with the "
+                    "wrong values.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        return fp
+
+    def _pair_metrics(
         self,
         X: pd.DataFrame,
         y: np.ndarray,
         seed: int,
         pair_indices: List[Tuple[int, int]],
+        fit_params: Optional[dict] = None,
     ) -> Dict:
         """
-        Fit model with given seed, compute SHAP interactions,
-        extract metrics for requested pairs only.
+        Fit, compute SHAP interactions, and extract per-pair metrics.
 
-        Returns dict with per-pair mean interaction and AUC.
+        The interaction statistic is mean|Φ_ij|, NOT the signed mean. SHAP
+        interaction values are roughly sign-symmetric across rows, so the
+        signed mean collapses towards zero and destroys the very signal it is
+        meant to measure — measured at ~3-6% of the magnitude on a DGP with a
+        known interaction.
         """
-        params = {**self.base_params, self.seed_param: seed}
-        model = self.model_class(**params)
-        model.fit(X, y, **self.fit_params)
+        model = self._fit_model(X, y, seed, fit_params)
+        interactions = _shap_interaction_values(model, X, self.use_gpu)
 
-        # Compute SHAP interaction values
-        if self.use_gpu:
-            try:
-                explainer = shap.explainers.GPUTree(
-                    model, X,
-                    feature_perturbation="tree_path_dependent",
-                )
-                interactions = explainer(X, interactions=True)
-            except Exception:
-                warnings.warn(
-                    f"GPU explainer failed for seed {seed}, falling back to CPU."
-                )
-                explainer = shap.TreeExplainer(model)
-                interactions = explainer.shap_interaction_values(X)
-        else:
-            explainer = shap.TreeExplainer(model)
-            interactions = explainer.shap_interaction_values(X)
-
-        # Handle binary classifiers returning list per class
-        if isinstance(interactions, list):
-            interactions = interactions[1]
-
-        # Extract metrics for each requested pair
         pair_results = {}
         for idx_i, idx_j in pair_indices:
-            # Mean interaction value across samples for this pair
             interaction_vals = interactions[:, idx_i, idx_j]
-            mean_val = float(np.mean(interaction_vals))
+            mean_abs = float(np.mean(np.abs(interaction_vals)))
 
-            # Per-interaction AUC: can this pair's SHAP interaction
-            # values alone discriminate the target?
             try:
                 auc = roc_auc_score(y, interaction_vals)
                 auc = max(auc, 1 - auc)  # direction-invariant
@@ -222,30 +397,89 @@ class InteractionTester:
                 auc = 0.5
 
             pair_results[(idx_i, idx_j)] = {
-                "mean_interaction": mean_val,
+                "mean_abs_interaction": mean_abs,
                 "auc": auc,
             }
 
         return pair_results
 
-    def _compute_instability_score(self, distribution: np.ndarray) -> float:
+    def _build_null_surrogate(self):
         """
-        Compute instability score for a bootstrap distribution of
-        interaction values across seeds.
+        Unfitted additive surrogate used to generate the null outcomes.
 
-        Measures the proportion of seeds where the interaction's sign
-        opposes the majority direction, doubled to form a two-sided
-        score. Range [0, 1]. Lower = more stable.
-
-        This is NOT a frequentist p-value. It quantifies how consistently
-        the interaction points in the same direction across model fits.
+        Depth-1 boosted stumps are additive by construction: a tree with one
+        split is a function of a single feature, so any ensemble of them is a
+        sum of univariate terms and can carry no interaction at all.
         """
-        observed_mean = np.mean(distribution)
-        if observed_mean > 0:
-            score = np.mean(distribution <= 0)
+        if self.null_surrogate is not None:
+            return self.null_surrogate
+
+        depth_param = _resolve_depth_param(self.model_class, self.base_params)
+        if depth_param is None:
+            raise ValueError(
+                f"{self.model_class.__name__} has no recognised depth parameter "
+                f"(looked for {', '.join(_DEPTH_PARAM_NAMES)}), so an additive "
+                "surrogate cannot be built automatically. Pass one explicitly "
+                "via null_surrogate=..., e.g. a depth-1 gradient boosting "
+                "classifier or a logistic regression on the raw features."
+            )
+
+        params = {**self.base_params, depth_param: 1,
+                  self.seed_param: self.random_state or 0}
+        return self.model_class(**params)
+
+    def _additive_probabilities(self, X: pd.DataFrame, y: np.ndarray) -> np.ndarray:
+        """p_add: fitted event probabilities under the additive surrogate."""
+        surrogate = self._build_null_surrogate()
+        surrogate.fit(X, y, **self.fit_params)
+        p_add = np.asarray(surrogate.predict_proba(X))[:, 1]
+        return np.clip(p_add, 1e-6, 1 - 1e-6)
+
+    def _bootstrap_replicate(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pair_indices: List[Tuple[int, int]],
+        seed: int,
+    ) -> Dict:
+        """One row-bootstrap replicate: resample rows, refit, rescore."""
+        rng = np.random.default_rng(seed)
+        n = len(y)
+        idx = rng.choice(n, n, replace=True)
+        X_b = X.iloc[idx].reset_index(drop=True)
+        y_b = y[idx]
+        if len(np.unique(y_b)) < 2:  # degenerate draw
+            return None
+        return self._pair_metrics(X_b, y_b, seed, pair_indices,
+                                  fit_params=self._resampled_fit_params(idx))
+
+    def _null_replicate(
+        self,
+        X: pd.DataFrame,
+        p_add: np.ndarray,
+        pair_indices: List[Tuple[int, int]],
+        seed: int,
+    ) -> Dict:
+        """One draw from the additive null: y* ~ Binomial(1, p_add), refit."""
+        rng = np.random.default_rng(seed)
+        y_star = rng.binomial(1, p_add).astype(int)
+        if len(np.unique(y_star)) < 2:  # degenerate draw
+            return None
+        return self._pair_metrics(X, y_star, seed, pair_indices)
+
+    def _run_replicates(self, fn, arg_list, desc):
+        """Run replicates honouring n_jobs; drop degenerate (None) draws."""
+        if self.n_jobs > 1:
+            out = Parallel(n_jobs=self.n_jobs)(
+                delayed(fn)(*args) for args in tqdm(arg_list, desc=desc)
+            )
         else:
-            score = np.mean(distribution >= 0)
-        return float(min(score * 2, 1.0))
+            out = [fn(*args) for args in tqdm(arg_list, desc=desc)]
+        return [o for o in out if o is not None]
+
+    # =========================================================================
+    # MAIN ENTRY POINT
+    # =========================================================================
 
     def test_pairs(
         self,
@@ -255,80 +489,121 @@ class InteractionTester:
         seeds: Optional[np.ndarray] = None,
     ) -> List[InteractionResult]:
         """
-        Test multiple feature pairs across n_seeds model fits.
+        Test multiple feature pairs against the additive null.
 
-        Computes all pairs per seed in a single pass to avoid
-        redundant model fitting and SHAP computation.
+        All pairs are scored from each model pass, so testing more pairs costs
+        almost nothing beyond the SHAP extraction.
 
         Parameters
         ----------
         X : pd.DataFrame
-            Feature matrix.
+            Feature matrix. Must be fully numeric.
         y : array-like
             Binary target.
         feature_pairs : list of (str, str)
             Feature pairs to test.
         seeds : array-like, optional
-            Specific seeds to use. If None, uses range(n_seeds).
+            DEPRECATED. The procedure no longer refits across seeds. If
+            provided, only its length is used, as n_bootstrap for this call.
 
         Returns
         -------
-        List of InteractionResult, one per pair. Each result contains
-        an instability_score (lower = more robust) and a robust flag.
+        List of InteractionResult, one per pair. `robust` is p_value < alpha
+        against the additive null; ci_low / ci_high are descriptive only.
         """
         self._validate_numeric_X(X)
-        if seeds is None:
-            seeds = np.arange(self.n_seeds)
+
+        n_bootstrap = self.n_bootstrap
+        if seeds is not None:
+            warnings.warn(
+                "The `seeds` argument is deprecated and will be removed in "
+                "v0.4.0; the procedure no longer refits across seeds. Using "
+                "len(seeds) as n_bootstrap for this call.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            n_bootstrap = len(seeds)
 
         y = np.asarray(y).ravel()
         columns = X.columns.tolist()
 
-        # Map feature names to indices once
         pair_indices = []
         for feat_i, feat_j in feature_pairs:
-            idx_i = columns.index(feat_i)
-            idx_j = columns.index(feat_j)
-            pair_indices.append((idx_i, idx_j))
+            pair_indices.append((columns.index(feat_i), columns.index(feat_j)))
 
-        # Run all seeds; each seed computes all pairs in one pass
-        if self.n_jobs > 1:
-            all_seed_results = Parallel(n_jobs=self.n_jobs)(
-                delayed(self._fit_single_seed)(X, y, int(seed), pair_indices)
-                for seed in tqdm(seeds, desc=f"{self.model_class.__name__}")
+        base_seed = 0 if self.random_state is None else int(self.random_state)
+
+        # --- 1. observed statistic, from a single fit on the real data -------
+        observed = self._pair_metrics(X, y, base_seed, pair_indices)
+
+        # --- 2. bootstrap over rows: descriptive interval only ---------------
+        boot_results = self._run_replicates(
+            self._bootstrap_replicate,
+            [(X, y, pair_indices, base_seed + 1_000 + r)
+             for r in range(n_bootstrap)],
+            desc=f"{self.model_class.__name__} bootstrap",
+        )
+
+        # --- 3. additive null: this is what makes `robust` mean anything -----
+        p_add = self._additive_probabilities(X, y)
+        null_results = self._run_replicates(
+            self._null_replicate,
+            [(X, p_add, pair_indices, base_seed + 500_000 + r)
+             for r in range(self.n_null)],
+            desc=f"{self.model_class.__name__} null",
+        )
+        if not null_results:
+            raise RuntimeError(
+                "Every additive-null draw was degenerate (single-class y*). "
+                "The additive surrogate's fitted probabilities are likely "
+                "saturated at 0 or 1; pass a better null_surrogate."
             )
-        else:
-            all_seed_results = [
-                self._fit_single_seed(X, y, int(seed), pair_indices)
-                for seed in tqdm(seeds, desc=f"{self.model_class.__name__}")
-            ]
 
-        # Assemble distributions per pair
+        # --- 4. assemble ----------------------------------------------------
         results = []
         for p_idx, (feat_i, feat_j) in enumerate(feature_pairs):
-            idx_i, idx_j = pair_indices[p_idx]
+            key = pair_indices[p_idx]
 
-            interaction_dist = np.array([
-                sr[(idx_i, idx_j)]["mean_interaction"] for sr in all_seed_results
-            ])
-            auc_dist = np.array([
-                sr[(idx_i, idx_j)]["auc"] for sr in all_seed_results
-            ])
+            observed_stat = observed[key]["mean_abs_interaction"]
+            boot_dist = np.array(
+                [r[key]["mean_abs_interaction"] for r in boot_results]
+            )
+            null_dist = np.array(
+                [r[key]["mean_abs_interaction"] for r in null_results]
+            )
+            auc_dist = np.array([observed[key]["auc"]]
+                                + [r[key]["auc"] for r in boot_results])
 
-            instability_score = self._compute_instability_score(interaction_dist)
+            # +1 conservative correction for finite replicates
+            p_value = float(
+                (np.sum(null_dist >= observed_stat) + 1) / (len(null_dist) + 1)
+            )
+
+            if boot_dist.size:
+                ci_low, ci_high = np.percentile(boot_dist, [2.5, 97.5])
+                std_interaction = float(np.std(boot_dist))
+            else:
+                ci_low = ci_high = float("nan")
+                std_interaction = float("nan")
 
             results.append(InteractionResult(
                 feature_i=feat_i,
                 feature_j=feat_j,
                 algorithm=self.model_class.__name__,
-                mean_interaction=float(np.mean(interaction_dist)),
-                std_interaction=float(np.std(interaction_dist)),
-                instability_score=instability_score,
+                mean_abs_interaction=float(observed_stat),
+                std_interaction=std_interaction,
+                ci_low=float(ci_low),
+                ci_high=float(ci_high),
+                p_value=p_value,
+                null_mean=float(np.mean(null_dist)),
                 per_interaction_auc=float(np.mean(auc_dist)),
                 mean_auc=float(np.mean(auc_dist)),
                 std_auc=float(np.std(auc_dist)),
-                n_seeds=len(seeds),
-                robust=instability_score < self.alpha,
-                interaction_distribution=interaction_dist,
+                n_bootstrap=len(boot_dist),
+                n_null=len(null_dist),
+                robust=p_value < self.alpha,
+                interaction_distribution=boot_dist,
+                null_distribution=null_dist,
                 auc_distribution=auc_dist,
             ))
 
@@ -343,22 +618,15 @@ class InteractionTester:
     ) -> List[Tuple[str, str]]:
         """
         Quick screening: single-fit SHAP interactions to identify
-        candidate pairs for full stability testing.
+        candidate pairs for full testing against the null.
 
-        NOTE: This uses a single seed for speed. Pairs selected here
-        may include false positives that the full test_pairs run will
-        filter out. This is intentional: it's a cheap pre-filter,
-        not a final result.
+        NOTE: This uses a single fit for speed. Pairs selected here may include
+        false positives that the full test_pairs run will filter out. This is
+        intentional: it's a cheap pre-filter, not a final result.
         """
         self._validate_numeric_X(X)
-        params = {**self.base_params, self.seed_param: seed}
-        model = self.model_class(**params)
-        model.fit(X, y, **self.fit_params)
-
-        explainer = shap.TreeExplainer(model)
-        interactions = explainer.shap_interaction_values(X)
-        if isinstance(interactions, list):
-            interactions = interactions[1]
+        model = self._fit_model(X, y, seed)
+        interactions = _shap_interaction_values(model, X, use_gpu=False)
 
         columns = X.columns.tolist()
         pair_scores = []
@@ -378,32 +646,36 @@ class InteractionTester:
         """
         Convert results to DataFrame with optional multiple testing correction.
 
-        The correction is applied to instability_scores. While these are
-        not formal p-values, the BH procedure is still valid as a
-        monotonic threshold adjustment that controls the proportion of
-        unstable interactions incorrectly labelled as robust.
+        The correction is applied to `P_Value`, which is a genuine permutation-
+        style p-value against the additive null. Before 0.2.0 the same call
+        corrected `instability_score`, a quantity that was not a p-value at
+        all, so the adjustment had no inferential meaning.
         """
         df = pd.DataFrame([
             {
                 "Feature_i": r.feature_i,
                 "Feature_j": r.feature_j,
                 "Algorithm": r.algorithm,
-                "Mean_Interaction": r.mean_interaction,
+                "Mean_Abs_Interaction": r.mean_abs_interaction,
                 "Std_Interaction": r.std_interaction,
-                "Instability_Score": r.instability_score,
+                "CI_Low": r.ci_low,
+                "CI_High": r.ci_high,
+                "P_Value": r.p_value,
+                "Null_Mean": r.null_mean,
                 "Per_Interaction_AUC": r.per_interaction_auc,
                 "Std_AUC": r.std_auc,
                 "Robust": r.robust,
-                "N_Seeds": r.n_seeds,
+                "N_Bootstrap": r.n_bootstrap,
+                "N_Null": r.n_null,
             }
             for r in results
         ])
 
         if correction_method and len(df) > 1:
-            reject, adj_scores, _, _ = multipletests(
-                df["Instability_Score"], alpha=self.alpha, method=correction_method
+            reject, adj_p, _, _ = multipletests(
+                df["P_Value"], alpha=self.alpha, method=correction_method
             )
-            df["Adjusted_Instability_Score"] = adj_scores
+            df["P_Value_Adjusted"] = adj_p
             df["Robust_Adjusted"] = reject
 
         return df
@@ -417,42 +689,46 @@ class InteractionTester:
         result: InteractionResult,
         figsize: Tuple[int, int] = (10, 6),
     ):
-        """Plot seed distribution of interaction values with zero reference."""
+        """Plot the null distribution against the observed statistic."""
         import matplotlib.pyplot as plt
         import seaborn as sns
 
         fig, axes = plt.subplots(1, 2, figsize=(figsize[0] * 2, figsize[1]))
 
-        # Left: interaction value distribution
+        # Left: additive null vs observed — the actual decision
         ax = axes[0]
-        sns.histplot(result.interaction_distribution, kde=True, ax=ax)
-        ax.axvline(0, color="r", linestyle="--", label="Zero (no interaction)", alpha=0.7)
+        sns.histplot(result.null_distribution, kde=True, ax=ax,
+                     color="grey", label="Additive null")
         ax.axvline(
-            result.mean_interaction, color="g", linestyle="-",
-            label=f"Mean: {result.mean_interaction:.6f}", alpha=0.7,
+            result.mean_abs_interaction, color="g", linestyle="-",
+            label=f"Observed: {result.mean_abs_interaction:.6f}", alpha=0.9,
+        )
+        ax.axvline(
+            float(np.percentile(result.null_distribution, 95)),
+            color="r", linestyle="--", label="Null 95th pct", alpha=0.7,
         )
         ax.set_title(
-            f"Interaction Distribution: {result.feature_i} x {result.feature_j}\n"
-            f"{result.algorithm} | instability={result.instability_score:.4f} | "
-            f"n_seeds={result.n_seeds}"
+            f"Observed vs Additive Null: {result.feature_i} x {result.feature_j}\n"
+            f"{result.algorithm} | p={result.p_value:.4f} | "
+            f"n_null={result.n_null}"
         )
-        ax.set_xlabel("Mean SHAP Interaction Value")
+        ax.set_xlabel("mean |SHAP interaction value|")
         ax.set_ylabel("Frequency")
         ax.legend()
 
-        # Right: per-interaction AUC distribution
+        # Right: bootstrap precision interval — descriptive only
         ax = axes[1]
-        sns.histplot(result.auc_distribution, kde=True, ax=ax)
-        ax.axvline(0.5, color="r", linestyle="--", label="No discrimination (0.5)", alpha=0.7)
-        ax.axvline(
-            result.mean_auc, color="g", linestyle="-",
-            label=f"Mean AUC: {result.mean_auc:.4f}", alpha=0.7,
-        )
+        sns.histplot(result.interaction_distribution, kde=True, ax=ax)
+        ax.axvline(result.ci_low, color="r", linestyle="--",
+                   label=f"2.5 pct: {result.ci_low:.6f}", alpha=0.7)
+        ax.axvline(result.ci_high, color="r", linestyle="--",
+                   label=f"97.5 pct: {result.ci_high:.6f}", alpha=0.7)
         ax.set_title(
-            f"Per-Interaction AUC: {result.feature_i} x {result.feature_j}\n"
-            f"{result.algorithm} | Std: {result.std_auc:.4f}"
+            f"Bootstrap precision (DESCRIPTIVE, not a test)\n"
+            f"{result.feature_i} x {result.feature_j} | "
+            f"n_bootstrap={result.n_bootstrap}"
         )
-        ax.set_xlabel("AUC (interaction term only)")
+        ax.set_xlabel("mean |SHAP interaction value|")
         ax.set_ylabel("Frequency")
         ax.legend()
 
@@ -465,29 +741,31 @@ class InteractionTester:
         figsize: Tuple[int, int] = (12, 5),
     ):
         """
-        Plot running mean and std of interaction value across seeds.
-        Useful for determining if n_seeds is sufficient for stability.
+        Plot running mean and std of the statistic across bootstrap replicates.
+        Useful for determining whether n_bootstrap is sufficient.
         """
         import matplotlib.pyplot as plt
 
         dist = result.interaction_distribution
         running_mean = np.cumsum(dist) / np.arange(1, len(dist) + 1)
         running_std = np.array([
-            np.std(dist[:i+1]) for i in range(len(dist))
+            np.std(dist[:i + 1]) for i in range(len(dist))
         ])
 
         fig, axes = plt.subplots(1, 2, figsize=figsize)
 
         axes[0].plot(running_mean)
-        axes[0].axhline(result.mean_interaction, color="r", linestyle="--", alpha=0.5)
+        axes[0].axhline(result.mean_abs_interaction, color="r", linestyle="--",
+                        alpha=0.5, label="Observed (full data)")
         axes[0].set_title(f"Convergence: {result.feature_i} x {result.feature_j}")
-        axes[0].set_xlabel("Number of Seeds")
-        axes[0].set_ylabel("Running Mean Interaction")
+        axes[0].set_xlabel("Number of Bootstrap Replicates")
+        axes[0].set_ylabel("Running Mean of mean|interaction|")
+        axes[0].legend()
 
         axes[1].plot(running_std)
         axes[1].set_title("Running Std")
-        axes[1].set_xlabel("Number of Seeds")
-        axes[1].set_ylabel("Std of Interaction")
+        axes[1].set_xlabel("Number of Bootstrap Replicates")
+        axes[1].set_ylabel("Std of mean|interaction|")
 
         plt.tight_layout()
         plt.show()
@@ -513,7 +791,7 @@ class InteractionTester:
         )
         ax.axvline(0.5, color="r", linestyle="--", alpha=0.5, label="No discrimination")
         ax.set_title(f"Top {top_n} Interactions by Per-Interaction AUC")
-        ax.set_xlabel("Mean Per-Interaction AUC (across seeds)")
+        ax.set_xlabel("Mean Per-Interaction AUC")
         ax.legend()
         plt.tight_layout()
         plt.show()
@@ -525,12 +803,12 @@ class InteractionTester:
 
 class InteractionVoter:
     """
-    Run interaction stability testing across multiple algorithms and vote.
+    Run interaction testing across multiple algorithms and vote.
 
-    An interaction is considered robust if it is stable (low instability_score)
-    across seeds for a given algorithm. Cross-algorithm voting then identifies
-    interactions that are robust properties of the data, not artifacts of a
-    specific algorithm's splitting strategy.
+    An interaction earns a vote from an algorithm when its magnitude is
+    significant against that algorithm's additive null (p_value < alpha).
+    Cross-algorithm voting then identifies interactions that are properties of
+    the data, not artifacts of a specific algorithm's splitting strategy.
 
     Parameters
     ----------
@@ -539,26 +817,46 @@ class InteractionVoter:
             "model_class": unfitted model class
             "params": frozen hyperparameters (no seed param)
             "seed_param": name of random seed parameter
-    n_seeds : int
-        Number of seeds per algorithm.
+            "null_surrogate": optional additive surrogate for that algorithm
+    n_bootstrap : int
+        Bootstrap replicates per algorithm (descriptive interval).
+    n_null : int
+        Additive-null replicates per algorithm (drives the p-value).
     alpha : float
-        Instability threshold below which an interaction is considered robust.
+        Significance level for the null p-value.
     use_gpu : bool
         GPU acceleration for SHAP.
     n_jobs : int
         Parallel jobs per algorithm.
+    random_state : int or None
+        Seeds bootstrap resampling and null draws.
+    n_seeds : int, optional
+        DEPRECATED alias for n_bootstrap.
     """
 
     def __init__(
         self,
         algorithm_configs: Dict[str, Dict[str, Any]],
-        n_seeds: int = 200,
+        n_bootstrap: int = 100,
+        n_null: int = 100,
         alpha: float = 0.05,
         use_gpu: bool = False,
         n_jobs: int = 1,
+        random_state: Optional[int] = 0,
+        n_seeds: Optional[int] = None,
     ):
+        if n_seeds is not None:
+            warnings.warn(
+                "n_seeds is deprecated and will be removed in v0.4.0; "
+                "use n_bootstrap instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            n_bootstrap = n_seeds
+
         self.algorithm_configs = algorithm_configs
-        self.n_seeds = n_seeds
+        self.n_bootstrap = n_bootstrap
+        self.n_null = n_null
         self.alpha = alpha
 
         self.testers = {}
@@ -567,10 +865,13 @@ class InteractionVoter:
                 model_class=config["model_class"],
                 base_params=config["params"],
                 seed_param=config.get("seed_param", "random_state"),
-                n_seeds=n_seeds,
+                n_bootstrap=n_bootstrap,
+                n_null=n_null,
                 alpha=alpha,
+                null_surrogate=config.get("null_surrogate"),
                 use_gpu=use_gpu,
                 n_jobs=n_jobs,
+                random_state=random_state,
             )
 
     def vote(
@@ -584,7 +885,7 @@ class InteractionVoter:
         Test each feature pair across all algorithms and tally votes.
 
         A pair receives a vote from an algorithm if it is robust
-        (instability_score < alpha) across that algorithm's seed runs.
+        (p_value < alpha against that algorithm's additive null).
         """
         all_results = {}
         for algo_name, tester in self.testers.items():
@@ -641,7 +942,8 @@ class InteractionVoter:
                 "Mean_AUC": vr.mean_auc_across_algorithms,
             }
             for algo_name, r in vr.algorithm_results.items():
-                row[f"{algo_name}_instability"] = r.instability_score
+                row[f"{algo_name}_p_value"] = r.p_value
+                row[f"{algo_name}_mean_abs_interaction"] = r.mean_abs_interaction
                 row[f"{algo_name}_auc"] = r.per_interaction_auc
                 row[f"{algo_name}_robust"] = r.robust
             rows.append(row)
@@ -690,7 +992,7 @@ class InteractionVoter:
                         fontsize=14, fontweight="bold", color="black",
                     )
 
-        ax.set_title("Per-Interaction AUC by Algorithm (* = robust)")
+        ax.set_title("Per-Interaction AUC by Algorithm (* = robust vs additive null)")
         plt.tight_layout()
         plt.show()
 
@@ -741,7 +1043,8 @@ class InteractionVoter:
     # tester = InteractionTester(
     #     model_class=XGBClassifier,
     #     base_params=configs["xgb"]["params"],
-    #     n_seeds=200,
+    #     n_bootstrap=100,
+    #     n_null=100,
     #     n_jobs=4,
     # )
     # top_pairs = tester.get_top_n_interactions(X, y, n=10)
@@ -751,7 +1054,7 @@ class InteractionVoter:
     # tester.plot_convergence(results[0])
 
     # ---- Full cross-algorithm vote ----
-    # voter = InteractionVoter(configs, n_seeds=200, alpha=0.05, n_jobs=4)
+    # voter = InteractionVoter(configs, n_bootstrap=100, n_null=100, alpha=0.05, n_jobs=4)
     # vote_results = voter.vote(X, y, top_pairs)
     # print(voter.summary(vote_results))
     # voter.plot_vote_heatmap(vote_results)

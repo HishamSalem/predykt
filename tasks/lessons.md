@@ -102,6 +102,59 @@ task's own title ("O(n²) instead of O(n³)"). Implemented instead by the equiva
 mean-subtraction identity `HMH = M − colmeans − rowmeans + grandmean`, which is O(n²).
 `tests/test_criteria.py::test_center_matches_explicit_HMH` pins it to the explicit form.
 
+## Task 3 — separation is much cleaner than the fix list reported
+
+The fix list's verification used 20 null replicates and was therefore sitting on the
+resolution floor. At `n_null=100` on the reference DGP:
+
+| | fix list (20 reps) | measured (100 reps) |
+|---|---|---|
+| true pair | observed 0.8941, null mean 0.1345, p = 0.048 | observed 0.8301, null mean 0.1337, q95 0.1577, **p = 0.0099** |
+| null pair | observed 0.1779, null mean 0.1566, p = 0.095 | observed 0.1660, null mean 0.1646, q95 0.1892, **p = 0.4851** |
+
+The null pair's p-value moves from 0.095 (uncomfortably close to alpha) to 0.485 — the null
+mean 0.1646 is essentially the observed 0.1660, which is exactly what "no interaction here"
+should look like. The fix list's own advice to use >= 100 replicates for release is borne out.
+
+Also reproduced the four defects on the current code before changing anything: signed-mean
+ratio 5.9% (true) / 2.9% (null); std across 5 seeds exactly 0.0; bootstrap CI
+[0.859, 1.056] and [0.163, 0.250] with `ci_low > 0` True for both — the tautology.
+
+## Task 3 — `get_top_n_interactions` ranks the NULL pair first under a weak learner
+
+Tried to strengthen `test_get_top_n` with "the true pair should rank first". It fails, and
+correctly so. With LGBM at 15 estimators / depth 3 on n=600, the single-fit screen ranks:
+
+```
+x2 x x3: 0.06901   <- the NULL pair, first
+x0 x x3: 0.02111
+x1 x x2: 0.02016
+x0 x x2: 0.01831
+x1 x x3: 0.01810
+x0 x x1: 0.00163   <- the TRUE pair, last
+```
+
+An underfit shallow model has not learned the `x0·x1` saddle at all, while `x2` and `x3`
+have strong main effects that leak into their pairwise SHAP interaction term. This is
+precisely the false-positive behaviour the method's own docstring warns about ("a cheap
+pre-filter, not a final result"), so asserting the opposite would contradict the documented
+contract. Assertion dropped, with the finding recorded in the test as a comment.
+
+It is also the single best illustration of why Task 3 was necessary: the pair the screen
+ranks first is the pair the additive null rejects hardest (p = 0.485).
+
+## Task 3 — bootstrapping rows breaks row-aligned `fit_params`, which the task did not mention
+
+`fit_params` is forwarded verbatim to every `fit()`. Once replicates resample rows, a
+row-aligned entry such as `sample_weight` still has the right *length*, so nothing errors —
+it just silently pairs each resampled row with a different row's weight. The pre-existing
+code never resampled, so the bug could not arise before this task.
+
+`sample_weight` is now reindexed with the bootstrap draw. It is special-cased rather than
+handled generically because `fit_params` is an open dict with no way to distinguish a
+row-aligned array from a scalar hyperparameter; any *other* entry that looks row-aligned
+(len == n) is passed through with a `UserWarning`.
+
 ---
 
 ## Task 2 — README §1 has no WOE example output table

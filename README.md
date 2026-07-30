@@ -37,7 +37,7 @@ pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the
 | Module                         | What it does                                                                              |
 | ------------------------------ | ----------------------------------------------------------------------------------------- |
 | `CyclicalBinner`               | IV-maximizing optimal binning for circular temporal features                              |
-| `InteractionTester`            | SHAP interaction stability testing via refit-across-seeds                                 |
+| `InteractionTester`            | SHAP interaction testing against a simulated additive null                                 |
 | `InteractionVoter`             | Cross-algorithm voting to distinguish data interactions from algorithm artifacts          |
 | `SeedRobustnessValidator`      | Statistical validation of hyperparameter config robustness across seeds                   |
 | `FeatureBinningAnalyzer`       | IV uplift screening for feature pair interactions via OptBinning                          |
@@ -47,7 +47,7 @@ pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the
 
 ## Quick Start
 
-> **Note on runtime:** examples using `n_seeds=200` or large `n_estimators` are illustrative of real production settings and can take minutes. Drop `n_seeds` to ~20 and estimators to ~50 for a fast smoke test.
+> **Note on runtime:** examples using large `n_null` / `n_bootstrap` / `n_seeds` or large `n_estimators` are illustrative of real production settings and can take minutes. For a fast smoke test, drop `n_null` and `n_bootstrap` to ~20 (and `SeedRobustnessValidator`'s `n_seeds` to ~20) and estimators to ~50. `InteractionTester` costs `1 + n_bootstrap + n_null + 1` model fits, each followed by a SHAP interaction pass — reduce `n_bootstrap` first, since it does not affect `robust`.
 
 ### 1. Cyclical Optimal Binning
 
@@ -85,9 +85,9 @@ woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 
 > ⚠️ **Breaking change in 0.2.0.** `transform_woe()`, `get_woe_encoder()`, `woe_` and `result_.woe_table()` return the **opposite sign** to predykt ≤ 0.1.2, which used `ln(%event / %non-event)`. A scorecard fitted with `CyclicalBinner` WOE on ≤ 0.1.2 must be refit, or its coefficients on those features negated. `iv_`, `iv_smoothed` and the `iv` column of `summary()` are unchanged.
 
-### 2. SHAP Interaction Stability Testing
+### 2. SHAP Interaction Testing Against an Additive Null
 
-A SHAP interaction from a single model fit conflates a real data relationship with random seed luck. `InteractionTester` refits the model across N seeds and measures whether the interaction is a stable property.
+A SHAP interaction from a single model fit tells you nothing on its own: a pair of features with strong main effects and *no* interaction still produces a non-zero interaction value. `InteractionTester` measures the interaction magnitude and scores it against a null simulated from an **additive** surrogate fitted to the same data.
 
 ```python
 import pandas as pd
@@ -103,38 +103,43 @@ tester = InteractionTester(
         "verbosity": 0,
     },
     seed_param="random_state",
-    n_seeds=200,          # illustrative; use ~20 for a quick check
+    n_null=100,           # additive-null replicates; drives the p-value
+    n_bootstrap=100,      # descriptive interval only; cheap to reduce
     alpha=0.05,
     n_jobs=4,
 )
 
-# Step 1: cheap single-seed screen to identify candidate pairs
+# Step 1: cheap single-fit screen to identify candidate pairs
 top_pairs = tester.get_top_n_interactions(X, y, n=10)
 
-# Step 2: full stability test across seeds
+# Step 2: full test against the additive null
 results = tester.test_pairs(X, y, top_pairs)
 
 # Step 3: results with optional BH multiple-testing correction
 df = tester.results_to_dataframe(results, correction_method="fdr_bh")
-print(df[["Feature_i", "Feature_j", "Instability_Score", "Per_Interaction_AUC", "Robust"]])
+print(df[["Feature_i", "Feature_j", "Mean_Abs_Interaction", "P_Value", "Robust"]])
 ```
 
 > `InteractionTester` requires **numeric-only** features — SHAP interaction values do not support native categorical splits. Encode categoricals (ordinal / target / WoE) before testing.
 
-**What `instability_score` means:**
+**How the null works.** Depth-1 stumps are additive by construction — a one-split tree is a function of a single feature, so no ensemble of them can carry an interaction. Fit those to `(X, y)`, draw `y* ~ Binomial(1, p_additive)`, refit the real model class on `(X, y*)`, and recompute `mean|Φ_ij|`. Repeating gives the distribution of interaction magnitude attributable to noise and to the estimator's own bias. The design follows the H-statistic's reference distribution in Friedman & Popescu (2008), §8.
 
-- Proportion of seeds where the interaction's sign opposes the majority direction (doubled for two-sidedness)
-- Range [0, 1]. Lower = more stable.
-- **This is not a frequentist p-value.** It measures algorithmic stability, not statistical significance under a null derived from the data-generating process.
+- `p_value` = `(#{null ≥ observed} + 1) / (n_null + 1)`, bounded below by `1/(n_null + 1)`
+- `robust` = `p_value < alpha` — **this is the decision rule**
+- `ci_low` / `ci_high` are a bootstrap **precision interval on the magnitude, descriptive only**. `mean|Φ_ij|` is strictly positive for any fitted tree ensemble, so this interval can never contain zero; `ci_low > 0` is a tautology that flags pure noise as significant. Do not use it as a criterion.
+
+> ⚠️ **Calibration limit.** The surrogate approximates the additive null; it is not the true null. The p-value is calibrated only insofar as depth-1 stumps capture the additive part of the data. Treat it as a principled screen with a real null, not an exact test.
 
 ```python
 tester.plot_interaction_distribution(results[0])   # requires predykt[plot]
-tester.plot_convergence(results[0])                # was n_seeds enough?
+tester.plot_convergence(results[0])                # was n_bootstrap enough?
 ```
+
+> **Removed in 0.2.0: `instability_score`.** It measured the proportion of seeds on which the signed mean interaction flipped direction, and had no power at all under a deterministic learner — with XGBoost at `subsample=1.0` every seed produces a bit-identical fit, so the score was exactly `0.0` for every pair including pure noise and `robust` was `True` for everything. The statistic was also signed, and SHAP interaction values are roughly sign-symmetric across rows, so the signed mean discarded ~95% of the magnitude it was meant to measure. See CHANGELOG for the migration.
 
 ### 3. Cross-Algorithm Voting
 
-An interaction that is stable within XGBoost may be an artifact of gradient boosting's splitting strategy, not a property of the data. `InteractionVoter` runs the same stability test across multiple algorithm families and tallies votes.
+An interaction that is significant within XGBoost may be an artifact of gradient boosting's splitting strategy, not a property of the data. `InteractionVoter` runs the same test against each algorithm's own additive null and tallies votes.
 
 ```python
 from xgboost import XGBClassifier
@@ -154,7 +159,7 @@ configs = {
              "seed_param": "random_state"},
 }
 
-voter = InteractionVoter(configs, n_seeds=200, alpha=0.05, n_jobs=4)
+voter = InteractionVoter(configs, n_bootstrap=100, n_null=100, alpha=0.05, n_jobs=4)
 vote_results = voter.vote(X, y, top_pairs)
 
 summary = voter.summary(vote_results)
@@ -163,7 +168,7 @@ print(summary[["Feature_i", "Feature_j", "Votes", "Vote_Ratio", "Unanimous", "Me
 voter.plot_vote_heatmap(vote_results)   # requires predykt[plot]
 ```
 
-Unanimous interactions (all algorithms agree) are the most reliable candidates for feature engineering or regulatory documentation.
+Unanimous interactions (every algorithm rejects its own additive null) are the most reliable candidates for feature engineering or regulatory documentation.
 
 ### 4. Seed Robustness Validation
 
@@ -345,7 +350,7 @@ print(group_comparison)
 
 ## Design Decisions
 
-**Why refit across seeds instead of permuting on a fixed model?** Permutation tests on a fixed model test whether the interaction is non-zero for that fit. Refitting tests whether the interaction is a stable property of the model family on this data, which is what matters for deployment. See the `InteractionTester` docstring for the full discussion.
+**Why simulate an additive null instead of permuting on a fixed model, or refitting across seeds?** Permuting on a fixed model tests whether the interaction is non-zero for that one fit, which is not the question. Refitting across seeds — what predykt ≤ 0.1.2 did — tests whether the interaction survives model randomness, but that has no power whenever the learner is deterministic: at `subsample=1.0` every seed gives a bit-identical fit, so the spread is exactly zero and every pair looks perfectly stable, noise included. Neither approach compares the interaction against anything. Simulating outcomes from an *additive* surrogate builds a reference distribution for "how big would this interaction look if there were no interaction at all," which is the comparison that licenses the word significant. Its cost is that the p-value inherits the surrogate's approximation error — stated plainly in §2 and in the module docstring.
 
 **Why Numba for CyclicalBinner?** Exhaustive enumeration of all k-partitions of a circular domain of cardinality m is O(C(m, k)) per k. For m=24, k=6 that's C(24,6) = 134,596 partitions. Numba JIT brings this from seconds to milliseconds. The method is univariate and binary-target only; it is designed for low-cardinality circular domains (hours, months), not high-cardinality fields.
 
