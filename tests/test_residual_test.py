@@ -46,7 +46,7 @@ class TestModeB:
         df, y, reps = binary_data
         shuffled = reps.sample(frac=1.0, random_state=1)  # same rows, new order
         t = ResidualRepresentationTester(n_folds=3)
-        with caplog.at_level(logging.WARNING, logger="predykt.fwl"):
+        with caplog.at_level(logging.WARNING, logger="predykt.residual_test"):
             t.fit(PAIR, df, y, {PAIR[0]: shuffled},
                   Y_resid=np.random.default_rng(0).normal(size=len(y)))
         assert any("verify row alignment" in m for m in caplog.messages)
@@ -79,6 +79,24 @@ class TestModeA:
                       df_cat, y, reps,
                       fit_params={"categorical_feature": ["cat1", "cat2"]})
         assert np.isfinite(res["pvalue"].iloc[0])
+
+
+class TestDeprecatedFwlAlias:
+    """predykt.fwl is kept as a shim for one release. The name was wrong:
+    FWL residualizes both sides of the regression, this residualizes only the
+    outcome."""
+
+    def test_shim_reexports_and_warns(self):
+        import importlib
+        import sys
+
+        sys.modules.pop("predykt.fwl", None)
+        with pytest.warns(DeprecationWarning, match="predykt.fwl is deprecated"):
+            fwl = importlib.import_module("predykt.fwl")
+        # The star-import must actually re-export something usable, which
+        # requires residual_test to define __all__.
+        assert fwl.__all__ == ["ResidualRepresentationTester"]
+        assert fwl.ResidualRepresentationTester is ResidualRepresentationTester
 
 
 class TestCategoricalAdapters:

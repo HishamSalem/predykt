@@ -14,8 +14,8 @@ from .criteria import (
 )
 from .cyclical_transformer import CyclicalBinner
 from .feature_binning import FeatureBinningAnalyzer
-from .fwl import ResidualRepresentationTester
 from .interaction_stability import InteractionTester, InteractionVoter
+from .residual_test import ResidualRepresentationTester
 from .seed_robustness import SeedRobustnessValidator
 from .shap_analyzer import SHAPInteractionAnalyzer
 
