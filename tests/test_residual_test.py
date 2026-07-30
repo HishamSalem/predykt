@@ -104,6 +104,9 @@ class TestCategoricalAdapters:
     crashed on bare model.fit before the patch."""
 
     def test_catboost_mode_a(self, binary_data):
+        # CI installs .[test] so this runs there; without the guard the suite
+        # looks broken on any local checkout that lacks catboost.
+        pytest.importorskip("catboost")
         from catboost import CatBoostClassifier
         df, y, reps = binary_data
         res = _mode_a(CatBoostAdapter(

@@ -6,6 +6,17 @@ joint predictive power of feature pairs. Intended as a screening tool in the
 early stage of a feature interaction pipeline — it identifies which pairs
 carry joint information beyond their marginal contributions. Not a substitute
 for the formal residual-based interaction test in ResidualRepresentationTester.
+
+Not to be confused with CyclicalBinner, which solves a different problem: this
+module does pairwise IV-uplift screening over arbitrary feature pairs
+(general-purpose, delegating the binning itself to optbinning), whereas
+CyclicalBinner computes the exact IV-maximizing partition of a single circular
+temporal feature by exhaustive enumeration.
+
+WOE convention: this module delegates to optbinning directly and therefore
+already reports WOE as ln(%non-event / %event). The 0.2.0 sign change in
+CyclicalBinner brought that class into line with optbinning; nothing here
+changed, and no flip applies to these tables.
 """
 
 import numpy as np
@@ -21,6 +32,10 @@ class FeatureBinningAnalyzer:
     (2D IV), then computes uplift = IV_2D - (IV_1 + IV_2). A positive uplift
     indicates the pair carries joint predictive information not captured by
     either feature alone.
+
+    Binning is delegated to optbinning, so the WOE convention in the returned
+    tables is optbinning's own, ln(%non-event / %event). CyclicalBinner's 0.2.0
+    sign change does not apply here.
 
     Parameters
     ----------
