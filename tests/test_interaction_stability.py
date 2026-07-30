@@ -163,6 +163,23 @@ class TestAdditiveNull:
         # at alpha, so it is not asserted here (see TestNullCalibration).
         assert by_pair[NULL_PAIR].ci_low > 0
 
+    def test_bootstrap_interval_runs_above_the_point_estimate(self, fast_results):
+        """Documented, not a bug in `robust`: resampling with replacement
+        duplicates rows and a tree ensemble fits duplicates more sharply, so
+        the bootstrap distribution of mean|phi| centres above the observed
+        value. Pinned so the docstring's claim cannot silently rot."""
+        _, by_pair = fast_results
+        for pair, r in by_pair.items():
+            boot_centre = float(np.mean(r.interaction_distribution))
+            assert boot_centre > r.mean_abs_interaction, (
+                f"{pair}: bootstrap centre {boot_centre:.4f} is not above the "
+                f"point estimate {r.mean_abs_interaction:.4f} — if this now "
+                "holds, the ci_low/ci_high docstring needs updating"
+            )
+        # robust is unaffected: it keys off p_value, which compares
+        # full-data fits against full-data fits.
+        assert by_pair[TRUE_PAIR].robust
+
     def test_p_value_respects_resolution_floor(self, fast_results):
         _, by_pair = fast_results
         for r in by_pair.values():

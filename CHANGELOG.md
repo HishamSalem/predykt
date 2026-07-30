@@ -92,7 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `InteractionResult.ci_low` / `ci_high` — 2.5/97.5 percentiles of the row bootstrap.
   **Descriptive only, not a decision rule:** `mean|Φ_ij|` is strictly positive for any
   fitted tree ensemble, so this interval can never contain zero and `ci_low > 0` is a
-  tautology that flags pure noise as significant.
+  tautology that flags pure noise as significant. It also runs *above*
+  `mean_abs_interaction` and on a weak pair excludes it — bootstrap resampling duplicates
+  rows, and a tree ensemble fits duplicated rows more sharply. Documented on the field and
+  in the README.
 - `InteractionResult.null_mean` and `null_distribution` — the additive null's location and
   full draw, for plotting and for reporting effect size as `observed / null_mean`.
 - `InteractionTester(random_state=...)` — seeds the bootstrap resampling and null draws.

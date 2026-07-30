@@ -39,6 +39,56 @@ dataset seed 0, not the punch list's 0.0328. Same code, same seed, different xgb
 build. That makes the fragility worse than reported, not better: the assertion is
 environment-dependent, so it cannot be fixed by choosing a luckier seed.
 
+## Task F — the reflected interval does not recentre either, so it was not adopted
+
+The punch list offered two options for the bootstrap interval's upward bias and preferred
+the "better, one line" basic / reverse-percentile form `[2θ̂ − q₉₇․₅, 2θ̂ − q₂․₅]`, on the
+grounds that it "recentres on the point estimate". Measured on the reference DGP, it does
+not:
+
+| pair | point est | percentile CI | reflected CI |
+|---|---|---|---|
+| x0*x1 (true) | 0.8301 | [0.8398, 1.0907] | [0.5694, 0.8203] |
+| x2*x3 (null) | 0.1660 | [0.1751, 0.2621] | [0.0699, 0.1569] |
+
+Bootstrap centre runs +13.2% (true) and +26.6% (null) above the point estimate. Because
+the bias exceeds the spread, the *entire* percentile interval sits above θ̂ — so reflecting
+it lands the entire interval *below* θ̂. Both forms exclude the point estimate; the
+reflected one additionally has an upper bound beneath it, which is arguably the more
+confusing artefact of the two.
+
+The punch list's own figure for the null pair, [0.0663, 0.1672], does bracket 0.1660, but
+only just, and it does not reproduce here.
+
+Took the "minimum" option the punch list also sanctioned: documented the bias, its cause
+(resampling with replacement duplicates rows; a tree ensemble fits duplicated rows more
+sharply, and the effect is larger on the weak pair where noise-fitting dominates), and why
+reflection was rejected. Added `test_bootstrap_interval_runs_above_the_point_estimate` so
+the documented claim cannot rot. BCa is the principled fix and stays a roadmap item — the
+jackknife acceleration term costs another n refits.
+
+## Task E — the CRLF problem was in the working tree, not the repository
+
+The punch list reported 9 CRLF files and warned that several would show as 100% rewritten,
+with `adapters.py`, `seed_robustness.py` and `shap_analyzer.py` appearing in the diff
+despite no task touching them. Byte-checking the actual blobs on both `main` and the
+branch:
+
+- Every file listed as CRLF is **LF in the repository on both sides**, except
+  `predykt/__init__.py` (CRLF on both, hence a small diff) and
+  `predykt/interaction_stability.py` (CRLF on main, LF here — but that file was rewritten
+  wholesale for Tasks 3 and 4, so its diff is large regardless).
+- `adapters.py`, `seed_robustness.py` and `shap_analyzer.py` were **never in
+  `git diff --stat main..HEAD`** at any point.
+
+`core.autocrlf=true` is set locally, so the *working tree* is CRLF by design; that is what
+was measured. It has no bearing on the diff.
+
+Added `.gitattributes` anyway — it makes the LF convention explicit and stops the stored
+endings depending on each contributor's config — and renormalised the one drifted file
+(`__init__.py`) in its own labelled commit. Skipped the proposed rebase: the substantive
+diff was already readable, and rewriting history would have gained nothing.
+
 ## Task A — `p_true < p_null` is not seed-robust either
 
 The punch list specified asserting `true_r.p_value < null_r.p_value` as a safe ordering

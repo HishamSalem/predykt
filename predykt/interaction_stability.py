@@ -151,6 +151,33 @@ class InteractionResult:
         tree ensemble, so the interval can never contain zero. "ci_low > 0" is
         a tautology that flags pure noise as robust; it is not a test against
         a null. Use `p_value` for that.
+
+        IT ALSO SITS ABOVE `mean_abs_interaction`, and on a weak pair it
+        excludes it entirely. Measured on the reference DGP: the true pair's
+        point estimate is 0.8301 against an interval of [0.8398, 1.0907], and
+        the null pair's is 0.1660 against [0.1751, 0.2621] — the bootstrap
+        distribution centres +13% and +27% high respectively.
+
+        The cause is the resampling scheme, not the sampling distribution:
+        drawing rows with replacement duplicates them, and a tree ensemble fits
+        duplicated rows more sharply, which inflates mean|Φ|. The effect is
+        larger on the weak pair, the signature of noise-fitting dominating when
+        the true effect is near zero.
+
+        Read these two numbers as the spread of the bootstrap distribution, not
+        as an interval centred on the observed value. `robust` is unaffected —
+        it keys off `p_value`, which compares like with like (both the observed
+        statistic and every null draw come from full-data fits).
+
+        The basic / reverse-percentile form [2θ̂ − q₉₇․₅, 2θ̂ − q₂․₅]
+        (Efron & Tibshirani 1993 ch. 13; Davison & Hinkley 1997 §5.2) is the
+        usual recentring device, and is deliberately NOT applied here: with a
+        bias this large it merely reflects the interval to the other side of
+        θ̂ without bracketing it, giving [0.5694, 0.8203] and [0.0699, 0.1569]
+        on the values above — still excluding the point estimate, and now with
+        an upper bound below it. That trades one misleading interval for
+        another. BCa would be the principled fix; its jackknife acceleration
+        term costs another n refits, so it is a roadmap item.
     p_value : float
         (#{null >= observed} + 1) / (n_null + 1) against the additive null.
         Bounded below by 1/(n_null + 1).
