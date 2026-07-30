@@ -83,7 +83,7 @@ woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 
 **WOE sign convention:** `ln(%non-event / %event)`, matching [optbinning](https://github.com/guillermo-navas-palencia/optbinning) (Navas-Palencia 2020, §2.1) and Siddiqi's *Credit Risk Scorecards*. WOE is inversely related to the event rate, so a bin with an above-average event rate gets a **negative** WOE. Both conventions circulate in the credit-risk literature; the reason to pin one is that `FeatureBinningAnalyzer` delegates to optbinning directly, and mixing conventions inside a single scorecard silently sign-flips whichever features came from the odd one out. Information Value is unaffected — it is symmetric in the two factors.
 
-> ⚠️ **Breaking change in 0.2.0.** `transform_woe()`, `get_woe_encoder()`, `woe_` and `result_.woe_table()` return the **opposite sign** to predykt ≤ 0.1.2, which used `ln(%event / %non-event)`. A scorecard fitted with `CyclicalBinner` WOE on ≤ 0.1.2 must be refit, or its coefficients on those features negated. `iv_`, `iv_smoothed` and the `iv` column of `summary()` are unchanged.
+> ⚠️ **Breaking change in 0.2.0.** `transform_woe()`, `get_woe_encoder()`, `woe_` and `result_.woe_table()` return the **opposite sign** to predykt ≤ 0.1.2, which used `ln(%event / %non-event)`. A scorecard fitted with `CyclicalBinner` WOE on ≤ 0.1.2 must be refit, or its coefficients on those features negated. `iv_`, `iv_smoothed` and the `iv` column of `summary()` are unchanged. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ### 2. SHAP Interaction Testing Against an Additive Null
 
@@ -140,7 +140,7 @@ tester.plot_interaction_distribution(results[0])   # requires predykt[plot]
 tester.plot_convergence(results[0])                # was n_bootstrap enough?
 ```
 
-> **Removed in 0.2.0: `instability_score`.** It measured the proportion of seeds on which the signed mean interaction flipped direction, and had no power at all under a deterministic learner — with XGBoost at `subsample=1.0` every seed produces a bit-identical fit, so the score was exactly `0.0` for every pair including pure noise and `robust` was `True` for everything. The statistic was also signed, and SHAP interaction values are roughly sign-symmetric across rows, so the signed mean discarded ~95% of the magnitude it was meant to measure. See CHANGELOG for the migration.
+> **Removed in 0.2.0: `instability_score`.** It measured the proportion of seeds on which the signed mean interaction flipped direction, and had no power at all under a deterministic learner — with XGBoost at `subsample=1.0` every seed produces a bit-identical fit, so the score was exactly `0.0` for every pair including pure noise and `robust` was `True` for everything. The statistic was also signed, and SHAP interaction values are roughly sign-symmetric across rows, so the signed mean discarded ~95% of the magnitude it was meant to measure. See [`CHANGELOG.md`](CHANGELOG.md) for the migration.
 
 ### 3. Cross-Algorithm Voting
 
@@ -382,4 +382,28 @@ MIT
 
 ## Citation
 
-If you use predykt in research or production systems, please cite the repository.
+If you use predykt in research or production systems, please cite it. Machine-readable
+metadata lives in [`CITATION.cff`](CITATION.cff) — GitHub renders a **Cite this repository**
+button from it, which will give you BibTeX or APA directly.
+
+```bibtex
+@software{salem_predykt,
+  author  = {Salem, Hisham},
+  title   = {predykt: a toolkit for rigorous feature interaction analysis
+             in machine learning},
+  version = {0.2.0},
+  year    = {2026},
+  url     = {https://github.com/HishamSalem/predykt},
+  license = {MIT}
+}
+```
+
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md). **0.2.0 contains breaking changes** — the
+`CyclicalBinner` WOE sign convention and several `InteractionTester` field names.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development setup, the linting policy,
+and the release process.

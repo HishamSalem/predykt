@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+title: "predykt: a toolkit for rigorous feature interaction analysis in machine learning"
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+authors:
+  - family-names: Salem
+    given-names: Hisham
+version: 0.2.0
+date-released: "2026-07-30"
+license: MIT
+repository-code: "https://github.com/HishamSalem/predykt"
+url: "https://github.com/HishamSalem/predykt#readme"
+abstract: >-
+  predykt is a Python toolkit for feature interaction analysis in tabular
+  machine learning. It provides cyclical optimal binning, SHAP interaction
+  testing against a simulated additive null, cross-algorithm voting, residual
+  representation testing, and seed robustness validation, organised as a
+  layered protocol in which each layer removes a different way a result can be
+  an artifact of one arbitrary choice.
+keywords:
+  - machine-learning
+  - feature-engineering
+  - shap
+  - feature-interactions
+  - credit-risk
+  - weight-of-evidence
+  - optimal-binning
+  - model-validation
