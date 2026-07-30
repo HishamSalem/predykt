@@ -117,7 +117,8 @@ results = tester.test_pairs(X, y, top_pairs)
 
 # Step 3: results with optional BH multiple-testing correction
 df = tester.results_to_dataframe(results, correction_method="fdr_bh")
-print(df[["Feature_i", "Feature_j", "Mean_Abs_Interaction", "P_Value", "Robust"]])
+print(df[["Feature_i", "Feature_j", "Mean_Abs_Interaction", "P_Value",
+          "OOF_Interaction_AUC", "Robust"]])
 ```
 
 > `InteractionTester` requires **numeric-only** features — SHAP interaction values do not support native categorical splits. Encode categoricals (ordinal / target / WoE) before testing.
@@ -129,6 +130,10 @@ print(df[["Feature_i", "Feature_j", "Mean_Abs_Interaction", "P_Value", "Robust"]
 - `ci_low` / `ci_high` are a bootstrap **precision interval on the magnitude, descriptive only**. `mean|Φ_ij|` is strictly positive for any fitted tree ensemble, so this interval can never contain zero; `ci_low > 0` is a tautology that flags pure noise as significant. Do not use it as a criterion.
 
 > ⚠️ **Calibration limit.** The surrogate approximates the additive null; it is not the true null. The p-value is calibrated only insofar as depth-1 stumps capture the additive part of the data. Treat it as a principled screen with a real null, not an exact test.
+
+**`oof_interaction_auc` is cross-fitted.** The interaction term's AUC is computed out of fold — each fold fits on its training rows and explains only the held-out rows — so no row is scored by a model that saw it. Scoring in-sample is circular: on a DGP where `(x2, x3)` have main effects but **no** interaction, in-sample AUC read 0.72; cross-fitted it reads 0.53, and the truly-interacting pair reads 0.78. The old `max(auc, 1 - auc)` floor is also gone: it guaranteed ≥ 0.5 by construction, so the metric could never report "no discrimination" even when that was the truth. The direction is fixed **once** on the full-data fit and reused for every fold — choosing it per fold would reintroduce the same selection bias.
+
+> This AUC answers "does this interaction term *alone* rank-order the target," which is narrower than "does adding this term improve the model." A cross-fitted ΔAUC would answer the latter and is the more standard choice; it is a roadmap item, not implemented. Note that DeLong et al. (1988) assumes fixed models, which cross-fitted predictions violate, so a paired bootstrap over folds would be the safer inference for this design.
 
 ```python
 tester.plot_interaction_distribution(results[0])   # requires predykt[plot]

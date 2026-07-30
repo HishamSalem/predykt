@@ -54,6 +54,7 @@ import pandas as pd
 import shap
 from joblib import Parallel, delayed
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import KFold
 from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
@@ -90,6 +91,20 @@ def _resolve_depth_param(model_class, base_params: dict) -> Optional[str]:
         p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
     )
     return "max_depth" if accepts_kwargs else None
+
+
+def _direction_sign(y: np.ndarray, values: np.ndarray) -> float:
+    """
+    +1 if larger `values` indicate the positive class, -1 otherwise.
+
+    Determined once on a full-data fit so a single fixed orientation can be
+    applied to every held-out fold. Returns +1 when the direction is
+    indeterminate (single-class y), which leaves the values untouched.
+    """
+    try:
+        return 1.0 if roc_auc_score(y, values) >= 0.5 else -1.0
+    except ValueError:
+        return 1.0
 
 
 def _shap_interaction_values(model, X: pd.DataFrame, use_gpu: bool = False):
@@ -141,8 +156,30 @@ class InteractionResult:
         Bounded below by 1/(n_null + 1).
     null_mean : float
         Mean of the null distribution, for context on the observed value.
+    oof_interaction_auc : float
+        AUC of this pair's SHAP interaction term against y, computed
+        OUT OF FOLD via K-fold cross-fitting, with the direction fixed once on
+        the full-data fit. ~0.50 means the term alone does not rank-order the
+        target. In-sample scoring inflated this to ~0.72 for a pair with no
+        interaction at all.
+    std_auc : float
+        Standard deviation of the per-fold AUCs.
     robust : bool
         True if p_value < alpha. This is the decision rule.
+
+    Notes
+    -----
+    What oof_interaction_auc does and does not answer: it asks "does this
+    interaction term, on its own, rank-order the target." That is narrower and
+    less standard than the usual question, "does adding this term improve the
+    model," which a cross-fitted ΔAUC would answer. ΔAUC is the better metric
+    and is a roadmap item, deliberately not implemented here.
+
+    If it is added, note that DeLong, DeLong & Clarke-Pearson (1988),
+    Biometrics 44(3):837-845 — the standard test for comparing correlated ROC
+    curves — assumes the two models are fixed. Cross-fitted predictions violate
+    that assumption, since the model differs per fold, so a paired bootstrap
+    over folds is the safer inference for this design.
     """
     feature_i: str
     feature_j: str
@@ -153,14 +190,14 @@ class InteractionResult:
     ci_high: float
     p_value: float
     null_mean: float
-    per_interaction_auc: float
-    mean_auc: float
+    oof_interaction_auc: float
     std_auc: float
     n_bootstrap: int
     n_null: int
     robust: bool
     interaction_distribution: np.ndarray = field(repr=False)
     null_distribution: np.ndarray = field(repr=False)
+    # Per-fold out-of-fold AUCs, one per cross-fitting fold.
     auc_distribution: np.ndarray = field(repr=False)
 
 
@@ -178,6 +215,8 @@ class VoteResult:
     vote_ratio: float
     algorithm_results: Dict[str, InteractionResult]
     unanimous: bool
+    # Mean of oof_interaction_auc across algorithms — a genuinely different
+    # quantity from any single result's AUC, so it keeps its own name.
     mean_auc_across_algorithms: float
 
     def __repr__(self):
@@ -225,7 +264,9 @@ class InteractionTester:
         error is raised in that case if this is left None), or when depth-1
         stumps are a poor additive fit for the data.
     n_folds : int, default=5
-        Reserved for cross-fitted interaction scoring.
+        K for the cross-fitted `oof_interaction_auc`. Each fold fits on the
+        training rows and explains only the held-out rows, so no row is scored
+        by a model that saw it.
     use_gpu : bool
         Whether to use GPU-accelerated SHAP explainer.
     n_jobs : int
@@ -240,11 +281,12 @@ class InteractionTester:
 
     Notes
     -----
-    COST: one fit on the real data, plus n_bootstrap + n_null fits, plus one
-    surrogate fit — each followed by a full SHAP interaction pass, which is the
-    dominant term. At the defaults that is 202 fits per call. All pairs are
-    scored from each pass, so testing more pairs is nearly free; reduce
-    n_bootstrap first if this is too slow, since it does not affect `robust`.
+    COST: one fit on the real data, plus n_bootstrap + n_null replicate fits,
+    plus n_folds cross-fitting fits, plus one surrogate fit — each followed by a
+    SHAP interaction pass, which is the dominant term. At the defaults that is
+    207 fits per call. All pairs are scored from each pass, so testing more
+    pairs is nearly free; reduce n_bootstrap first if this is too slow, since it
+    does not affect `robust`.
     """
 
     def __init__(
@@ -336,30 +378,33 @@ class InteractionTester:
         model.fit(X, y, **(self.fit_params if fit_params is None else fit_params))
         return model
 
-    def _resampled_fit_params(self, idx: np.ndarray) -> dict:
+    def _subset_fit_params(self, idx: np.ndarray, n_full: int) -> dict:
         """
-        fit_params with row-aligned entries reindexed to a bootstrap draw.
+        fit_params with row-aligned entries reindexed to a subset of rows.
 
-        Only ``sample_weight`` is handled: it is the one row-aligned fit
-        parameter common to every supported library, and leaving it unpermuted
-        would silently pair each resampled row with another row's weight. Any
-        other row-aligned entry is passed through unchanged and warned about,
-        because fit_params is an open dict and there is no general way to tell
-        a row-aligned array from a scalar hyperparameter.
+        Used for both bootstrap draws and cross-fitting folds. Only
+        ``sample_weight`` is handled: it is the one row-aligned fit parameter
+        common to every supported library. Leaving it alone would silently pair
+        each resampled row with another row's weight on a bootstrap draw, and
+        outright fail on a CV fold, where the subset is shorter than the
+        weights.
+
+        Any other entry whose length matches the full row count is passed
+        through unchanged and warned about — fit_params is an open dict, and
+        there is no general way to tell a row-aligned array from a scalar
+        hyperparameter that happens to be a sequence.
         """
         fp = dict(self.fit_params)
-        n = len(idx)
         if "sample_weight" in fp and fp["sample_weight"] is not None:
             fp["sample_weight"] = np.asarray(fp["sample_weight"])[idx]
         for key, val in fp.items():
             if key == "sample_weight":
                 continue
-            if isinstance(val, (np.ndarray, pd.Series, list)) and len(val) == n:
+            if isinstance(val, (np.ndarray, pd.Series, list)) and len(val) == n_full:
                 warnings.warn(
-                    f"fit_params['{key}'] looks row-aligned (length {n}) but is "
-                    "not resampled with the bootstrap draw; only sample_weight "
-                    "is. Results for this replicate may pair rows with the "
-                    "wrong values.",
+                    f"fit_params['{key}'] looks row-aligned (length {n_full}) "
+                    "but is not subset alongside the rows; only sample_weight "
+                    "is. Results may pair rows with the wrong values.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -388,20 +433,86 @@ class InteractionTester:
         pair_results = {}
         for idx_i, idx_j in pair_indices:
             interaction_vals = interactions[:, idx_i, idx_j]
-            mean_abs = float(np.mean(np.abs(interaction_vals)))
-
-            try:
-                auc = roc_auc_score(y, interaction_vals)
-                auc = max(auc, 1 - auc)  # direction-invariant
-            except ValueError:
-                auc = 0.5
-
             pair_results[(idx_i, idx_j)] = {
-                "mean_abs_interaction": mean_abs,
-                "auc": auc,
+                "mean_abs_interaction": float(np.mean(np.abs(interaction_vals))),
+                # Sign of the implied direction, fixed once here on the full-data
+                # fit and reused for every held-out fold. See _oof_interaction_auc.
+                "sign": _direction_sign(y, interaction_vals),
             }
 
         return pair_results
+
+    def _oof_interaction_auc(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pair_indices: List[Tuple[int, int]],
+        signs: Dict[Tuple[int, int], float],
+        seed: int,
+    ) -> Dict:
+        """
+        Cross-fitted AUC of each pair's SHAP interaction term.
+
+        Follows the cross-fitting pattern in
+        predykt.residual_test._compute_residuals: fit on the training folds,
+        explain only the held-out fold, and assemble one out-of-fold value per
+        row. Scoring the interaction values of a model on the same rows it was
+        fitted to is circular — measured in-sample AUC for a pair with NO
+        interaction was 0.72 on the reference DGP, where the honest answer is
+        ~0.50.
+
+        The direction is fixed ONCE, from the full-data fit, and that single
+        sign is applied to every fold. Choosing the sign per fold (or via
+        max(auc, 1 - auc)) reintroduces exactly the selection bias this method
+        exists to remove: on a weak pair the implied direction flips between
+        folds, and picking the better orientation each time floors the metric
+        at 0.5 by construction, so it can never report "no discrimination" even
+        when that is the truth.
+
+        Returns per-pair the AUC on the assembled out-of-fold vector, plus the
+        per-fold AUCs for a spread estimate.
+        """
+        n = len(y)
+        n_splits = max(2, min(self.n_folds, n))
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+        oof_values = {key: np.full(n, np.nan) for key in pair_indices}
+        fold_aucs = {key: [] for key in pair_indices}
+
+        for train_idx, val_idx in kf.split(X):
+            y_tr = y[train_idx]
+            if len(np.unique(y_tr)) < 2:
+                continue
+            model = self._fit_model(
+                X.iloc[train_idx].reset_index(drop=True), y_tr, seed,
+                # Row-aligned fit params must follow the fold, not the full data.
+                fit_params=self._subset_fit_params(train_idx, n),
+            )
+            interactions = _shap_interaction_values(
+                model, X.iloc[val_idx].reset_index(drop=True), self.use_gpu,
+            )
+            for key in pair_indices:
+                idx_i, idx_j = key
+                vals = signs[key] * interactions[:, idx_i, idx_j]
+                oof_values[key][val_idx] = vals
+                try:
+                    fold_aucs[key].append(float(roc_auc_score(y[val_idx], vals)))
+                except ValueError:  # single-class fold
+                    pass
+
+        out = {}
+        for key in pair_indices:
+            vals = oof_values[key]
+            scored = ~np.isnan(vals)
+            try:
+                oof_auc = float(roc_auc_score(y[scored], vals[scored]))
+            except ValueError:
+                oof_auc = 0.5
+            out[key] = {
+                "oof_auc": oof_auc,
+                "fold_aucs": np.array(fold_aucs[key], dtype=float),
+            }
+        return out
 
     def _build_null_surrogate(self):
         """
@@ -450,8 +561,10 @@ class InteractionTester:
         y_b = y[idx]
         if len(np.unique(y_b)) < 2:  # degenerate draw
             return None
-        return self._pair_metrics(X_b, y_b, seed, pair_indices,
-                                  fit_params=self._resampled_fit_params(idx))
+        return self._pair_metrics(
+            X_b, y_b, seed, pair_indices,
+            fit_params=self._subset_fit_params(idx, n),
+        )
 
     def _null_replicate(
         self,
@@ -536,6 +649,10 @@ class InteractionTester:
         # --- 1. observed statistic, from a single fit on the real data -------
         observed = self._pair_metrics(X, y, base_seed, pair_indices)
 
+        # --- 1b. cross-fitted AUC, direction fixed by the pass above --------
+        signs = {key: observed[key]["sign"] for key in pair_indices}
+        oof = self._oof_interaction_auc(X, y, pair_indices, signs, base_seed)
+
         # --- 2. bootstrap over rows: descriptive interval only ---------------
         boot_results = self._run_replicates(
             self._bootstrap_replicate,
@@ -571,8 +688,7 @@ class InteractionTester:
             null_dist = np.array(
                 [r[key]["mean_abs_interaction"] for r in null_results]
             )
-            auc_dist = np.array([observed[key]["auc"]]
-                                + [r[key]["auc"] for r in boot_results])
+            auc_dist = oof[key]["fold_aucs"]
 
             # +1 conservative correction for finite replicates
             p_value = float(
@@ -596,9 +712,8 @@ class InteractionTester:
                 ci_high=float(ci_high),
                 p_value=p_value,
                 null_mean=float(np.mean(null_dist)),
-                per_interaction_auc=float(np.mean(auc_dist)),
-                mean_auc=float(np.mean(auc_dist)),
-                std_auc=float(np.std(auc_dist)),
+                oof_interaction_auc=oof[key]["oof_auc"],
+                std_auc=float(np.std(auc_dist)) if auc_dist.size else float("nan"),
                 n_bootstrap=len(boot_dist),
                 n_null=len(null_dist),
                 robust=p_value < self.alpha,
@@ -662,7 +777,7 @@ class InteractionTester:
                 "CI_High": r.ci_high,
                 "P_Value": r.p_value,
                 "Null_Mean": r.null_mean,
-                "Per_Interaction_AUC": r.per_interaction_auc,
+                "OOF_Interaction_AUC": r.oof_interaction_auc,
                 "Std_AUC": r.std_auc,
                 "Robust": r.robust,
                 "N_Bootstrap": r.n_bootstrap,
@@ -777,21 +892,21 @@ class InteractionTester:
         color: str = "#1f77b4",
         figsize: Tuple[int, int] = (12, 8),
     ):
-        """Plot top feature interactions by per-interaction AUC."""
+        """Plot top feature interactions by out-of-fold interaction AUC."""
         import matplotlib.pyplot as plt
         import seaborn as sns
 
-        plot_df = results_df.nlargest(top_n, "Per_Interaction_AUC").copy()
+        plot_df = results_df.nlargest(top_n, "OOF_Interaction_AUC").copy()
         plot_df["Feature Pair"] = plot_df["Feature_i"] + " x " + plot_df["Feature_j"]
 
         fig, ax = plt.subplots(figsize=figsize)
         sns.barplot(
-            x="Per_Interaction_AUC", y="Feature Pair",
+            x="OOF_Interaction_AUC", y="Feature Pair",
             data=plot_df, color=color, ax=ax,
         )
         ax.axvline(0.5, color="r", linestyle="--", alpha=0.5, label="No discrimination")
-        ax.set_title(f"Top {top_n} Interactions by Per-Interaction AUC")
-        ax.set_xlabel("Mean Per-Interaction AUC")
+        ax.set_title(f"Top {top_n} Interactions by Out-of-Fold Interaction AUC")
+        ax.set_xlabel("OOF AUC (interaction term only)")
         ax.legend()
         plt.tight_layout()
         plt.show()
@@ -910,7 +1025,7 @@ class InteractionVoter:
                 algo_results[algo_name] = r
                 if r.robust:
                     votes += 1
-                aucs.append(r.per_interaction_auc)
+                aucs.append(r.oof_interaction_auc)
 
             vote_results.append(VoteResult(
                 feature_i=feat_i,
@@ -944,7 +1059,7 @@ class InteractionVoter:
             for algo_name, r in vr.algorithm_results.items():
                 row[f"{algo_name}_p_value"] = r.p_value
                 row[f"{algo_name}_mean_abs_interaction"] = r.mean_abs_interaction
-                row[f"{algo_name}_auc"] = r.per_interaction_auc
+                row[f"{algo_name}_oof_auc"] = r.oof_interaction_auc
                 row[f"{algo_name}_robust"] = r.robust
             rows.append(row)
 
@@ -968,7 +1083,7 @@ class InteractionVoter:
         for i, vr in enumerate(vote_results):
             for j, algo in enumerate(algo_names):
                 r = vr.algorithm_results[algo]
-                auc_matrix[i, j] = r.per_interaction_auc
+                auc_matrix[i, j] = r.oof_interaction_auc
                 robust_matrix[i, j] = r.robust
 
         fig, ax = plt.subplots(figsize=figsize)
@@ -992,7 +1107,7 @@ class InteractionVoter:
                         fontsize=14, fontweight="bold", color="black",
                     )
 
-        ax.set_title("Per-Interaction AUC by Algorithm (* = robust vs additive null)")
+        ax.set_title("OOF Interaction AUC by Algorithm (* = robust vs additive null)")
         plt.tight_layout()
         plt.show()
 

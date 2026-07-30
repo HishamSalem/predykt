@@ -141,24 +141,126 @@ class TestAdditiveNull:
 
         df = tester.results_to_dataframe(results)
         assert {"Feature_i", "Feature_j", "Mean_Abs_Interaction", "P_Value",
-                "CI_Low", "CI_High", "Robust"} <= set(df.columns)
+                "CI_Low", "CI_High", "OOF_Interaction_AUC",
+                "Robust"} <= set(df.columns)
         assert "Instability_Score" not in df.columns
+        assert "Per_Interaction_AUC" not in df.columns
         # BH correction now has a real p-value to correct
         assert {"P_Value_Adjusted", "Robust_Adjusted"} <= set(df.columns)
 
+
+class TestOOFInteractionAUC:
+    """In-sample scoring of a model's own SHAP values is circular: it gave
+    AUC 0.72 for a pair with no interaction, where the honest answer is ~0.50."""
+
+    def test_null_pair_auc_near_half(self, fast_results):
+        _, by_pair = fast_results
+        auc = by_pair[NULL_PAIR].oof_interaction_auc
+        assert 0.45 <= auc <= 0.55, (
+            f"null pair OOF AUC should be ~0.50, got {auc:.4f}"
+        )
+
+    def test_true_pair_auc_discriminates(self, fast_results):
+        _, by_pair = fast_results
+        auc = by_pair[TRUE_PAIR].oof_interaction_auc
+        assert auc >= 0.70, f"true pair OOF AUC should be >= 0.70, got {auc:.4f}"
+
+    def test_no_duplicate_auc_field(self, fast_results):
+        _, by_pair = fast_results
+        r = by_pair[TRUE_PAIR]
+        assert not hasattr(r, "per_interaction_auc")
+        assert not hasattr(r, "mean_auc")
+        assert hasattr(r, "oof_interaction_auc")
+
+    def test_auc_distribution_is_per_fold(self, fast_results):
+        tester, by_pair = fast_results
+        r = by_pair[TRUE_PAIR]
+        assert r.auc_distribution.size == tester.n_folds
+        assert np.isfinite(r.std_auc)
+
+    def test_no_direction_invariant_floor_in_executable_code(self):
+        """max(auc, 1-auc) floored the metric at 0.5 by construction, so it
+        could never report "no discrimination".
+
+        Scans executable code only — string literals and comments are stripped,
+        so the docstrings that explain why the floor was removed do not trip it.
+        """
+        import io
+        import tokenize
+
+        from predykt import interaction_stability
+
+        with open(interaction_stability.__file__, encoding="utf-8") as fh:
+            source = fh.read()
+        code = "".join(
+            tok.string
+            for tok in tokenize.generate_tokens(io.StringIO(source).readline)
+            if tok.type not in (tokenize.STRING, tokenize.COMMENT)
+        )
+        collapsed = code.replace(" ", "")
+        assert "max(auc,1-auc)" not in collapsed
+        assert "max(1-auc,auc)" not in collapsed
+
+    def test_auc_can_fall_below_half(self):
+        """Without the floor, a pure-noise pair is free to land on either
+        side of 0.5 rather than being pushed above it."""
+        rng = np.random.default_rng(3)
+        X = pd.DataFrame(rng.normal(size=(300, 3)), columns=["a", "b", "c"])
+        y = rng.binomial(1, 0.5, size=300)  # pure noise: y independent of X
+        it = InteractionTester(model_class=LGBMClassifier,
+                               base_params=LGBM_PARAMS, n_bootstrap=1,
+                               n_null=3, alpha=0.5, n_folds=3, random_state=1)
+        pair_indices = [(0, 1)]
+        obs = it._pair_metrics(X, y, 0, pair_indices)
+        signs = {k: obs[k]["sign"] for k in pair_indices}
+        oof = it._oof_interaction_auc(X, y, pair_indices, signs, 0)
+        auc = oof[(0, 1)]["oof_auc"]
+        assert 0.0 <= auc <= 1.0
+        assert abs(auc - 0.5) < 0.15, f"pure noise should be near 0.5, got {auc}"
+
+    def test_sign_fixed_once_not_per_fold(self, interaction_dgp):
+        """One sign, chosen outside the fold loop. Choosing it per fold
+        reintroduces the selection bias cross-fitting removes."""
+        X, y = interaction_dgp
+        it = InteractionTester(model_class=LGBMClassifier,
+                               base_params=LGBM_PARAMS, n_bootstrap=1,
+                               n_null=3, alpha=0.5, n_folds=3, random_state=0)
+        pair_indices = [(2, 3)]
+        obs = it._pair_metrics(X, y, 0, pair_indices)
+        sign = obs[(2, 3)]["sign"]
+        assert sign in (1.0, -1.0)
+
+        # Flipping the single fixed sign must flip the OOF AUC about 0.5 —
+        # proof that one orientation is applied throughout rather than the
+        # better of two being picked per fold.
+        a = it._oof_interaction_auc(X, y, pair_indices, {(2, 3): sign}, 0)
+        b = it._oof_interaction_auc(X, y, pair_indices, {(2, 3): -sign}, 0)
+        assert a[(2, 3)]["oof_auc"] == pytest.approx(
+            1.0 - b[(2, 3)]["oof_auc"], abs=1e-9)
+
+class TestReferenceDGPAcceptance:
+    """The published acceptance criteria, at full size. ~24s, hence `slow`."""
+
     @pytest.mark.slow
     def test_reference_dgp_separation(self):
-        """Full acceptance config: n=1500, XGB n_estimators=150 max_depth=4."""
+        """n=1500, 4 features, logit = 2.5*x0*x1 + 1.0*x2 + 1.0*x3,
+        XGBClassifier n_estimators=150 max_depth=4 subsample=1.0."""
         from xgboost import XGBClassifier
         X, y = _interaction_dgp(1500)
         tester = InteractionTester(
             model_class=XGBClassifier, base_params=XGB_REFERENCE,
-            n_bootstrap=20, n_null=100, alpha=0.05, n_jobs=1, random_state=0,
+            n_bootstrap=20, n_null=100, alpha=0.05, n_folds=5, n_jobs=1,
+            random_state=0,
         )
         res = {(r.feature_i, r.feature_j): r
                for r in tester.test_pairs(X, y, [TRUE_PAIR, NULL_PAIR])}
+
+        # Additive null separates the pairs
         assert res[TRUE_PAIR].p_value <= 0.05
         assert res[NULL_PAIR].p_value > 0.05
+        # Cross-fitted AUC is honest about the null pair
+        assert 0.45 <= res[NULL_PAIR].oof_interaction_auc <= 0.55
+        assert res[TRUE_PAIR].oof_interaction_auc >= 0.70
 
 
 class TestNullSurrogate:
@@ -244,8 +346,20 @@ class TestInteractionTester:
                                n_null=3, alpha=0.5,
                                fit_params={"sample_weight": np.arange(10.0)})
         idx = np.array([3, 3, 7, 0, 1, 9, 9, 2, 5, 4])
-        fp = it._resampled_fit_params(idx)
+        fp = it._subset_fit_params(idx, 10)
         assert np.array_equal(fp["sample_weight"], idx.astype(float))
+
+    def test_sample_weight_is_subset_for_cv_folds(self):
+        """A CV fold is shorter than the full data, so an unsubset weight
+        vector does not merely misalign — LightGBM rejects it outright."""
+        it = InteractionTester(model_class=LGBMClassifier,
+                               base_params=LGBM_PARAMS, n_bootstrap=1,
+                               n_null=3, alpha=0.5,
+                               fit_params={"sample_weight": np.arange(10.0)})
+        fold = np.array([0, 2, 4, 6, 8])
+        fp = it._subset_fit_params(fold, 10)
+        assert len(fp["sample_weight"]) == len(fold)
+        assert np.array_equal(fp["sample_weight"], fold.astype(float))
 
     def test_get_top_n(self, interaction_dgp):
         X, y = interaction_dgp
@@ -280,6 +394,7 @@ class TestInteractionVoter:
         # Vote semantics must key off the new robust flag
         assert "lgbm_p_value" in summary.columns
         assert "lgbm_robust" in summary.columns
+        assert "lgbm_oof_auc" in summary.columns
         assert "lgbm_instability" not in summary.columns
         for v in votes:
             expected = sum(r.robust for r in v.algorithm_results.values())

@@ -155,6 +155,33 @@ handled generically because `fit_params` is an open dict with no way to distingu
 row-aligned array from a scalar hyperparameter; any *other* entry that looks row-aligned
 (len == n) is passed through with a `UserWarning`.
 
+## Task 4 — cross-fitting broke row-aligned `fit_params` louder than bootstrapping did
+
+The same `fit_params` problem from Task 3, but a CV fold is *shorter* than the full data, so
+a full-length `sample_weight` does not merely misalign — LightGBM rejects it outright
+("Length of weights differs from the length of #data"). Caught by the existing
+`test_fit_params_full_length_sample_weight`.
+
+Generalised the Task 3 helper from `_resampled_fit_params(idx)` to
+`_subset_fit_params(idx, n_full)`, used by both the bootstrap draws and the fold fits. The
+`n_full` argument matters: the old signature inferred the full row count from `len(idx)`,
+which is right for a bootstrap draw (same size) but wrong for a fold, so the "looks
+row-aligned" warning silently stopped firing for folds.
+
+## Task 4 — "no `max(auc, 1 - auc)` anywhere in the file" cannot be taken literally
+
+The acceptance criterion is a bare substring check, but the docstring explaining *why* the
+floor was removed necessarily contains the expression. Scanning raw source therefore fails
+on the very documentation the task asked for.
+
+The test tokenises the module and strips `STRING` and `COMMENT` tokens before checking, so
+it constrains executable code only. Measured values, reference DGP:
+
+| | in-sample (old) | cross-fitted (new) |
+|---|---|---|
+| true pair | 0.8183 | **0.7781** (fix list predicted 0.777) |
+| null pair | 0.7214 | **0.5296** (fix list predicted 0.518) |
+
 ---
 
 ## Task 2 — README §1 has no WOE example output table
