@@ -1,6 +1,57 @@
-# Lessons / corrections to the v2 fix list
+# Lessons / corrections to the fix lists
 
-Log of places where the v2 fix list's stated facts did not match the repo as found.
+Log of places where a fix list's stated facts did not match what was measured here.
+
+---
+
+## Task A — the punch list's Type-I numbers do not reproduce, and its bound is too tight
+
+The punch list's diagnosis is right: asserting `not null_r.robust` on one dataset draw is
+a coin flip that lands wrong at rate alpha. But its *remedy* was calibrated on numbers
+this machine does not reproduce.
+
+Measured here (xgboost in this venv), K=20 datasets, alpha=0.05, n_null=60:
+
+| DGP | pair | rejection rate |
+|---|---|---|
+| purely additive (H0 true everywhere) | (x0,x1) | 2/20 = 0.100 |
+| purely additive | (x2,x3) | 2/20 = 0.100 |
+| interaction DGP | (x0,x1) — true | 20/20 = 1.000 (power) |
+| interaction DGP | (x2,x3) — "null" | 4/20 = **0.200** |
+
+Two consequences:
+
+1. **The `<= 3` bound on K=10 is not CI-safe.** The punch list justified it as
+   "P(X>=4) = 0.0010 under a correctly-sized test", which assumes a true rate of 0.05. At
+   the rate actually measured on the interaction DGP (0.20) that bound flakes **12%** of
+   the time — replacing a deterministic failure with an intermittent one. Used `<= 4`
+   plus a `<= 5` discrimination bound instead; at rate 0.20 those flake 3.3% and 0.6%.
+
+2. **The interaction DGP is the wrong place to measure Type-I.** `(x2, x3)` is null only
+   in the data-generating sense; the fitted model has learned a strong `x0·x1` saddle that
+   leaks into other pairs' SHAP interaction terms, which is why its rate (0.20) is double
+   the additive DGP's (0.10). Split into two tests: Type-I is measured on a purely
+   additive DGP where H0 genuinely holds for every pair, and the interaction DGP carries
+   the power/discrimination claim.
+
+Also note the failing tests **pass on this machine** — the null pair gets p=0.1148 on
+dataset seed 0, not the punch list's 0.0328. Same code, same seed, different xgboost
+build. That makes the fragility worse than reported, not better: the assertion is
+environment-dependent, so it cannot be fixed by choosing a luckier seed.
+
+## Task A — `p_true < p_null` is not seed-robust either
+
+The punch list specified asserting `true_r.p_value < null_r.p_value` as a safe ordering
+claim. Over ten dataset seeds it holds on nine and **ties on seed 3**, where the null pair
+also lands on a Type-I error and both p-values sit exactly on the resolution floor
+1/(n_null+1) = 0.0164. Used `<=` and documented the tie condition.
+
+Effect-size ratios measured over the same ten seeds — the quantity that is genuinely
+stable, and what the fast test now asserts:
+
+```
+true pair: 6.63 - 8.80x        null pair: 0.69 - 1.54x        gap: 5.09
+```
 
 ---
 

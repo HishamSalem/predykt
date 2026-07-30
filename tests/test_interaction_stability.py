@@ -34,6 +34,20 @@ def _interaction_dgp(n, seed=0):
     return X, y
 
 
+def _additive_dgp(n, seed=0):
+    """logit = x0 + x1 + x2 + x3 — main effects only, NO interaction anywhere.
+
+    The correct setting for a Type-I measurement: H0 is genuinely true for
+    every pair, so any rejection is a false positive.
+    """
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(rng.normal(size=(n, 4)),
+                     columns=["x0", "x1", "x2", "x3"])
+    logit = X["x0"] + X["x1"] + X["x2"] + X["x3"]
+    y = rng.binomial(1, 1.0 / (1.0 + np.exp(-logit)))
+    return X, y
+
+
 @pytest.fixture(scope="module")
 def interaction_dgp():
     return _interaction_dgp(600)
@@ -80,22 +94,53 @@ class TestAdditiveNull:
     noise.
     """
 
-    def test_null_pair_not_robust_true_pair_robust(self, fast_results):
+    def test_effect_size_separates_true_from_null(self, fast_results):
+        """Assert the mechanism, not a single draw's significance verdict.
+
+        The stable quantity is the effect-size ratio observed/null_mean. Across
+        ten dataset seeds it measured 6.6-8.8x for the true pair and 0.7-1.5x
+        for the null pair — a clean gap with no overlap. The null pair's
+        *p-value* is not stable: it ranged 0.016-0.984 over the same seeds and
+        crossed alpha on 2 of 10.
+
+        Deliberately NOT asserting `not null_r.robust` here. A single-draw
+        significance assertion at alpha=0.05 is false a few percent of the time
+        by construction — that is what alpha means — and hunting for a seed
+        where it happens to hold would be cherry-picking, not testing. The
+        rejection *rate* is the testable property; see
+        TestNullCalibration below.
+        """
         _, by_pair = fast_results
         true_r, null_r = by_pair[TRUE_PAIR], by_pair[NULL_PAIR]
 
+        true_ratio = true_r.mean_abs_interaction / true_r.null_mean
+        null_ratio = null_r.mean_abs_interaction / null_r.null_mean
+
+        assert true_ratio > 3.0, (
+            f"true pair should tower over its null: observed "
+            f"{true_r.mean_abs_interaction:.4f} vs null mean "
+            f"{true_r.null_mean:.4f} = {true_ratio:.2f}x"
+        )
+        assert null_ratio < 2.5, (
+            f"null pair should sit near its null: observed "
+            f"{null_r.mean_abs_interaction:.4f} vs null mean "
+            f"{null_r.null_mean:.4f} = {null_ratio:.2f}x"
+        )
+        assert true_ratio > null_ratio
+
+        # Ordering, not thresholds. `<=` rather than `<`: when the null pair
+        # also lands on a Type-I error both p-values sit on the resolution
+        # floor 1/(n_null+1) and tie exactly, which happened on 1 of 10 seeds.
+        assert true_r.p_value <= null_r.p_value
+
+        # Safe on every seed tested: the true pair sits at the resolution
+        # floor 1/(n_null+1) and was rejected 20/20 across fresh datasets.
         assert true_r.robust, (
             f"true interaction should be significant: p={true_r.p_value:.4f}, "
             f"observed={true_r.mean_abs_interaction:.4f}, "
             f"null mean={true_r.null_mean:.4f}"
         )
-        assert not null_r.robust, (
-            f"null pair must NOT be flagged robust: p={null_r.p_value:.4f}, "
-            f"observed={null_r.mean_abs_interaction:.4f}, "
-            f"null mean={null_r.null_mean:.4f}"
-        )
         assert true_r.p_value <= 0.05
-        assert null_r.p_value > 0.05
 
     def test_observed_statistic_is_non_negative(self, fast_results):
         _, by_pair = fast_results
@@ -113,9 +158,10 @@ class TestAdditiveNull:
                 "can never contain zero — which is why ci_low>0 must not be "
                 "used as the robustness criterion"
             )
-        # The null pair has ci_low > 0 yet is correctly NOT robust.
+        # The null pair's interval excludes zero too — which is the whole
+        # point. Whether this particular draw is flagged robust is a coin flip
+        # at alpha, so it is not asserted here (see TestNullCalibration).
         assert by_pair[NULL_PAIR].ci_low > 0
-        assert not by_pair[NULL_PAIR].robust
 
     def test_p_value_respects_resolution_floor(self, fast_results):
         _, by_pair = fast_results
@@ -237,6 +283,90 @@ class TestOOFInteractionAUC:
         b = it._oof_interaction_auc(X, y, pair_indices, {(2, 3): -sign}, 0)
         assert a[(2, 3)]["oof_auc"] == pytest.approx(
             1.0 - b[(2, 3)]["oof_auc"], abs=1e-9)
+
+class TestNullCalibration:
+    """Rejection RATES over many datasets — the property a single draw cannot test.
+
+    A one-dataset assertion that the null pair is not flagged robust is false
+    at rate alpha by construction. What must hold is that the rate tracks
+    alpha, and that power is high.
+    """
+
+    @staticmethod
+    def _sweep(gen, k, pairs, n_null=60):
+        """Rejection counts and observed/null_mean ratios over k datasets."""
+        from xgboost import XGBClassifier
+        counts = {p: 0 for p in pairs}
+        ratios = {p: [] for p in pairs}
+        for s in range(k):
+            X, y = gen(600, seed=s)
+            tester = InteractionTester(
+                model_class=XGBClassifier, base_params=XGB_FAST,
+                n_bootstrap=2, n_null=n_null, alpha=0.05, n_jobs=1,
+                random_state=0,
+            )
+            for r in tester.test_pairs(X, y, pairs):
+                key = (r.feature_i, r.feature_j)
+                if r.robust:
+                    counts[key] += 1
+                ratios[key].append(r.mean_abs_interaction / r.null_mean)
+        return counts, {p: np.array(v) for p, v in ratios.items()}
+
+    @pytest.mark.slow
+    def test_type_i_error_respects_alpha_on_additive_dgp(self):
+        """Type-I error, measured where H0 is genuinely true for every pair.
+
+        Bound: <= 4 of 10. Measured rejection rate on this DGP was 0.100
+        (2/20 for each pair), at which P(count > 4) = 0.0016; even if the true
+        rate were 0.20 the bound would flake only 3% of the time. A `<= 3`
+        bound would be too tight — at rate 0.20 it flakes 12% of the time.
+
+        Fails loudly if `robust` is ever hardwired True: that gives 10/10.
+        """
+        counts, ratios = self._sweep(_additive_dgp, 10, [TRUE_PAIR, NULL_PAIR])
+        for pair, n_rej in counts.items():
+            assert n_rej <= 4, (
+                f"{pair}: rejected {n_rej}/10 on a purely additive DGP where "
+                f"no pair interacts; alpha=0.05 should not produce this rate"
+            )
+        # With no interaction anywhere, no pair should tower over its null.
+        for pair, r in ratios.items():
+            assert r.max() < 2.5, (
+                f"{pair}: observed/null ratio reached {r.max():.2f}x on a "
+                "purely additive DGP"
+            )
+
+    @pytest.mark.slow
+    def test_power_and_discrimination_on_interaction_dgp(self):
+        """Power for the true pair, and a strictly lower rate for the null pair.
+
+        The null pair's rate is higher here than on the purely additive DGP
+        (measured 0.20 vs 0.10): the fitted model has learned a strong x0*x1
+        saddle, which leaks into other pairs' SHAP interaction terms. That
+        makes this a discrimination test, not a Type-I test — the clean Type-I
+        measurement is the additive-DGP test above.
+        """
+        counts, ratios = self._sweep(_interaction_dgp, 10,
+                                     [TRUE_PAIR, NULL_PAIR])
+        assert counts[TRUE_PAIR] == 10, (
+            f"true pair rejected only {counts[TRUE_PAIR]}/10; measured power "
+            "was 20/20 across fresh datasets"
+        )
+        assert counts[NULL_PAIR] < counts[TRUE_PAIR], (
+            f"null pair rejected {counts[NULL_PAIR]}/10 vs true pair "
+            f"{counts[TRUE_PAIR]}/10 — the test is not discriminating"
+        )
+        assert counts[NULL_PAIR] <= 5
+
+        # The effect-size separation the fast test asserts on one seed, shown
+        # to hold on all ten: measured 6.6-8.8x vs 0.7-1.5x, no overlap.
+        assert ratios[TRUE_PAIR].min() > 3.0
+        assert ratios[NULL_PAIR].max() < 2.5
+        assert ratios[TRUE_PAIR].min() > ratios[NULL_PAIR].max(), (
+            f"ratios overlap: true min {ratios[TRUE_PAIR].min():.2f}x vs "
+            f"null max {ratios[NULL_PAIR].max():.2f}x"
+        )
+
 
 class TestReferenceDGPAcceptance:
     """The published acceptance criteria, at full size. ~24s, hence `slow`."""
