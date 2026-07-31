@@ -1,4 +1,33 @@
-# predykt fix list v2 — execution plan
+# predykt fix list — execution plan
+
+**Status: all tasks complete.** Tasks 0–6 (v2 fix list) and A–F (final punch list) are
+landed. 99 passed / 96 with `-m "not slow"`, 0 failures; `ruff --select F,E9` clean.
+Corrections to both lists are logged in [lessons.md](lessons.md).
+
+Remaining work is the manual 0.2.0 release (tag, build, upload) — owner action, not part
+of the PR. See CONTRIBUTING.md for the process.
+
+---
+
+## Final punch list (A–F)
+
+- [x] **A** — Fast additive-null test rewritten to assert the effect-size ratio, not a
+      single draw's significance. Rejection *rates* moved to two `slow` calibration tests:
+      Type-I on a purely additive DGP (bound `<= 4`, not `<= 3` — see lessons), power and
+      discrimination on the interaction DGP. Mutation-verified.
+- [x] **B** — `CHANGELOG.md`, Keep a Changelog format.
+- [x] **C** — `CITATION.cff` + BibTeX block in the README.
+- [x] **D** — `CONTRIBUTING.md`, incl. the release process and the deliberate lint gap
+      (147 findings under the configured `E,F,I,B,UP`; CI gates on `F,E9` only).
+- [x] **E** — `.gitattributes` added; `__init__.py` renormalised in its own commit. The
+      reported CRLF spread was working-tree only — see lessons. Rebase skipped as
+      unnecessary.
+- [x] **F** — Bootstrap interval's upward bias documented on the field and in the README;
+      reflection evaluated and rejected with measurements. Pinned by a test.
+
+---
+
+## v2 fix list (0–6)
 
 Branch: `fix/interaction-and-release`. Baseline: `main` @ `ffd82dd`.
 One commit per task, in the order below. `pytest -q` after every task.
