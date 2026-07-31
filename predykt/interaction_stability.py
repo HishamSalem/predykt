@@ -107,6 +107,26 @@ def _direction_sign(y: np.ndarray, values: np.ndarray) -> float:
         return 1.0
 
 
+def _tree_interactions(model, X: pd.DataFrame):
+    """shap.TreeExplainer, with the base_score version clash reported usefully."""
+    try:
+        return shap.TreeExplainer(model).shap_interaction_values(X)
+    except ValueError as exc:
+        if "could not convert string to float" not in str(exc):
+            raise
+        # shap <= 0.49 parses the model JSON's base_score with a bare float(),
+        # but xgboost >= 3.1 writes it as a bracketed list ("[5.4E-1]"). The
+        # raw error names neither library, so say which pair is incompatible.
+        raise RuntimeError(
+            f"shap {getattr(shap, '__version__', '?')} cannot read this model's "
+            "base_score, which newer XGBoost writes as a list (e.g. '[5.4E-1]'). "
+            "This is a version clash between shap and xgboost, not a problem "
+            "with your data. Fix it by upgrading shap to >= 0.50 (which needs "
+            "Python >= 3.11) or, on Python 3.10, by pinning xgboost < 3.1. "
+            f"Original error: {exc}"
+        ) from exc
+
+
 def _shap_interaction_values(model, X: pd.DataFrame, use_gpu: bool = False):
     """SHAP interaction values as an (n, p, p) array for the positive class."""
     if use_gpu:
@@ -117,9 +137,9 @@ def _shap_interaction_values(model, X: pd.DataFrame, use_gpu: bool = False):
             interactions = explainer(X, interactions=True)
         except Exception:
             warnings.warn("GPU explainer failed, falling back to CPU.")
-            interactions = shap.TreeExplainer(model).shap_interaction_values(X)
+            interactions = _tree_interactions(model, X)
     else:
-        interactions = shap.TreeExplainer(model).shap_interaction_values(X)
+        interactions = _tree_interactions(model, X)
 
     # Binary classifiers may return one array per class
     if isinstance(interactions, list):

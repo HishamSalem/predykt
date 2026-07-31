@@ -130,6 +130,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the caveat that DeLong et al. (1988) assumes fixed models — an assumption
   cross-fitted predictions violate.
 
+- On Python 3.10, `shap.TreeExplainer` cannot read models from `xgboost >= 3.1`, failing
+  with `could not convert string to float: '[5.4E-1]'`. shap fixed its `base_score` parsing
+  in 0.50, but shap 0.50+ requires Python >= 3.11, so 3.10 is capped at shap 0.49.1. predykt
+  now raises a `RuntimeError` naming the version clash instead of letting the raw error
+  through, and the `test` extra pins `xgboost < 3.1` on Python 3.10. Users on 3.10 who need
+  `xgboost >= 3.1` must upgrade to Python 3.11+.
+
 ### Known limitations
 
 - The additive null's p-value is calibrated only insofar as the depth-1 surrogate

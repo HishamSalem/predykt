@@ -4,6 +4,39 @@ Log of places where a fix list's stated facts did not match what was measured he
 
 ---
 
+## CI — the new XGBoost tests surfaced a latent shap/xgboost version clash on Python 3.10
+
+The `test (3.10)` job failed with `ValueError: could not convert string to float: '[5.4E-1]'`
+from `shap/explainers/_tree.py`. Not a logic bug: shap <= 0.49 parses the model JSON's
+`base_score` with a bare `float()`, and newer xgboost writes it as a bracketed list.
+
+It only appeared now because the pre-existing suite never called
+`shap.TreeExplainer` on an XGBoost model — `test_interaction_stability.py` used LightGBM
+throughout, and `test_fwl.py`'s XGBoost tests went through an adapter without SHAP. The
+additive-null tests are the first to combine the two, so they exposed it.
+
+Resolution measured per Python version (`pip install --dry-run --python-version`):
+
+| Python | shap | xgboost | result |
+|---|---|---|---|
+| 3.10 | 0.49.1 | 3.2.0 | crash |
+| 3.11 | 0.51.0 | 3.2.0 | ok |
+| 3.12 | 0.52.0 | 3.3.0 | ok |
+
+The cap is structural: **shap >= 0.50 requires Python >= 3.11**, so 3.10 can never get the
+fixed parser. Bisected the other side on a real 3.10 venv against shap 0.49.1 — 2.1.0 OK,
+2.1.4 OK, 3.0.0 OK, **3.1.0 FAILS**, 3.2.0 FAILS. Note the boundary is 3.1, not the 2.1 that
+the usual write-ups of this bug name.
+
+Fixed by pinning `xgboost < 3.1` on `python_version < '3.11'` in the `test` extra, leaving
+3.11/3.12 on the latest (verified still 3.2.0 / 3.3.0). Verified end to end by building a
+Python 3.10 venv with exactly what CI now installs (shap 0.49.1 + xgboost 3.0.5) and running
+the suite: **101 passed**.
+
+Also added a `RuntimeError` that names the clash, because the raw message mentions neither
+shap nor xgboost and is genuinely baffling — a user on 3.10 with their own
+`xgboost >= 3.1` hits this at runtime, not just in CI.
+
 ## Task A — the punch list's Type-I numbers do not reproduce, and its bound is too tight
 
 The punch list's diagnosis is right: asserting `not null_r.robust` on one dataset draw is

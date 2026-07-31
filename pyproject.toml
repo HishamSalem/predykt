@@ -36,7 +36,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff"]
-test = ["pytest>=7", "lightgbm>=3.3", "xgboost>=1.7", "catboost>=1.2"]
+test = [
+    "pytest>=7",
+    "lightgbm>=3.3",
+    # shap >= 0.50 requires Python >= 3.11, so on 3.10 the newest installable
+    # shap is 0.49.1 — which predates the fix for the bracketed base_score that
+    # xgboost >= 3.1 writes into its model JSON. TreeExplainer then dies with
+    # "could not convert string to float: '[5.4E-1]'". Bisected on Python 3.10
+    # against shap 0.49.1: 2.1.4 OK, 3.0.0 OK, 3.1.0 FAILS, 3.2.0 FAILS.
+    "xgboost>=1.7,<3.1; python_version < '3.11'",
+    "xgboost>=1.7; python_version >= '3.11'",
+    "catboost>=1.2",
+]
 plot = ["matplotlib>=3.5", "seaborn>=0.12"]
 
 [project.urls]

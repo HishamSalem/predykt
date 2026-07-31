@@ -410,6 +410,33 @@ class TestReferenceDGPAcceptance:
         assert res[TRUE_PAIR].oof_interaction_auc >= 0.70
 
 
+class TestShapVersionClash:
+    """shap <= 0.49 parses base_score with a bare float(), but xgboost >= 3.1
+    writes it as a bracketed list. The raw ValueError names neither library."""
+
+    def test_base_score_clash_is_reported_usefully(self, monkeypatch):
+        from predykt import interaction_stability as mod
+
+        class _Exploding:
+            def __init__(self, model):
+                raise ValueError("could not convert string to float: '[5.4E-1]'")
+
+        monkeypatch.setattr(mod.shap, "TreeExplainer", _Exploding)
+        with pytest.raises(RuntimeError, match="version clash between shap and xgboost"):
+            mod._tree_interactions(object(), pd.DataFrame({"a": [1.0]}))
+
+    def test_unrelated_value_errors_are_not_swallowed(self, monkeypatch):
+        from predykt import interaction_stability as mod
+
+        class _Exploding:
+            def __init__(self, model):
+                raise ValueError("some entirely different problem")
+
+        monkeypatch.setattr(mod.shap, "TreeExplainer", _Exploding)
+        with pytest.raises(ValueError, match="entirely different problem"):
+            mod._tree_interactions(object(), pd.DataFrame({"a": [1.0]}))
+
+
 class TestNullSurrogate:
     def test_depth_param_resolution(self):
         from sklearn.ensemble import RandomForestClassifier
