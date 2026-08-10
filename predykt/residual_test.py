@@ -66,14 +66,14 @@ Refutation:
 """
 
 import logging
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 from statsmodels.stats.multitest import multipletests
-from typing import Dict, List, Optional, Tuple, Union
 
 from .adapters import resolve_adapter
-from .criteria import Stage2Estimator, OLSEstimator, Stage2Result
+from .criteria import OLSEstimator, Stage2Estimator, Stage2Result
 
 logger = logging.getLogger(__name__)
 
@@ -120,13 +120,13 @@ class ResidualRepresentationTester:
     def __init__(
         self,
         model=None,
-        stage2: Optional[Stage2Estimator] = None,
+        stage2: Stage2Estimator | None = None,
         n_folds: int = 5,
-        fit_params: Optional[Dict] = None,
+        fit_params: dict | None = None,
         correction_method: str = "fdr_bh",
         correction_scope: str = "per_pair",
         alpha: float = 0.05,
-        random_state: Optional[int] = 42,
+        random_state: int | None = 42,
         criterion=None,
     ):
         self.model = model
@@ -134,7 +134,7 @@ class ResidualRepresentationTester:
         resolved = criterion if criterion is not None else stage2
         if resolved is None:
             resolved = OLSEstimator(alpha=alpha)
-        self.criteria: List[Stage2Estimator] = (
+        self.criteria: list[Stage2Estimator] = (
             resolved if isinstance(resolved, list) else [resolved]
         )
         self.stage2 = self.criteria[0]  # backward-compat alias
@@ -144,11 +144,11 @@ class ResidualRepresentationTester:
         self.alpha = alpha
         self.random_state = random_state
 
-        self.Y_resid_: Optional[np.ndarray] = None
-        self.results_: Optional[List[dict]] = None
-        self.feature_pairs_: Optional[List[Tuple]] = None
-        self._T_k_map_: Dict[Tuple, np.ndarray] = {}
-        self._criteria_by_method_: Dict[str, Stage2Estimator] = {}
+        self.Y_resid_: np.ndarray | None = None
+        self.results_: list[dict] | None = None
+        self.feature_pairs_: list[tuple] | None = None
+        self._T_k_map_: dict[tuple, np.ndarray] = {}
+        self._criteria_by_method_: dict[str, Stage2Estimator] = {}
 
     # =========================================================================
     # STAGE 1: OOF RESIDUALS
@@ -169,7 +169,7 @@ class ResidualRepresentationTester:
 
         return y - p_hat
 
-    def _check_alignment(self, rep_df: pd.DataFrame, X: pd.DataFrame, pair: Tuple) -> None:
+    def _check_alignment(self, rep_df: pd.DataFrame, X: pd.DataFrame, pair: tuple) -> None:
         n_resid = len(self.Y_resid_)
         if len(rep_df) != n_resid:
             raise ValueError(
@@ -188,11 +188,11 @@ class ResidualRepresentationTester:
 
     def fit(
         self,
-        feature_pairs: List[Tuple[str, str]],
+        feature_pairs: list[tuple[str, str]],
         X: pd.DataFrame,
         y: np.ndarray,
-        representations: Union[pd.DataFrame, Dict[Tuple, pd.DataFrame]],
-        Y_resid: Optional[np.ndarray] = None,
+        representations: pd.DataFrame | dict[tuple, pd.DataFrame],
+        Y_resid: np.ndarray | None = None,
     ) -> "ResidualRepresentationTester":
         """
         Compute OOF residuals (stage 1) and test all representations (stage 2).
@@ -239,7 +239,7 @@ class ResidualRepresentationTester:
             rep_dict = {tuple(k): v for k, v in representations.items()}
 
         # --- Stage 2: run all criteria for all representations ---
-        raw_rows: List[dict] = []
+        raw_rows: list[dict] = []
         self._T_k_map_ = {}
         self._criteria_by_method_ = {}
 
@@ -277,14 +277,14 @@ class ResidualRepresentationTester:
                     })
 
         # --- Multiple testing correction ---
-        def _apply_bh(rows_to_correct: List[dict]) -> None:
+        def _apply_bh(rows_to_correct: list[dict]) -> None:
             valid_mask = [
                 r["pvalue"] is not None
                 and not (isinstance(r["pvalue"], float) and np.isnan(r["pvalue"]))
                 for r in rows_to_correct
             ]
-            valid_rows   = [r for r, ok in zip(rows_to_correct, valid_mask) if ok]
-            invalid_rows = [r for r, ok in zip(rows_to_correct, valid_mask) if not ok]
+            valid_rows   = [r for r, ok in zip(rows_to_correct, valid_mask, strict=True) if ok]
+            invalid_rows = [r for r, ok in zip(rows_to_correct, valid_mask, strict=True) if not ok]
             valid_pvals  = [r["pvalue"] for r in valid_rows]
 
             for r in invalid_rows:
@@ -298,7 +298,7 @@ class ResidualRepresentationTester:
                 reject, padj, _, _ = multipletests(
                     valid_pvals, alpha=self.alpha, method=self.correction_method
                 )
-                for row, rej, pc in zip(valid_rows, reject, padj):
+                for row, rej, pc in zip(valid_rows, reject, padj, strict=True):
                     row["pvalue_bh"] = float(pc)
                     row["rejected"]  = bool(rej)
 
@@ -306,14 +306,14 @@ class ResidualRepresentationTester:
             _apply_bh(raw_rows)
         else:
             # per_pair: correct within each (pair, criterion) group independently
-            groups: Dict[tuple, List[dict]] = {}
+            groups: dict[tuple, list[dict]] = {}
             for row in raw_rows:
                 groups.setdefault((row["pair"], row["criterion"]), []).append(row)
             for rows in groups.values():
                 _apply_bh(rows)
 
         # Winner: rejected + largest |statistic| per (pair, criterion)
-        winner_groups: Dict[tuple, List[dict]] = {}
+        winner_groups: dict[tuple, list[dict]] = {}
         for row in raw_rows:
             winner_groups.setdefault((row["pair"], row["criterion"]), []).append(row)
         for rows in winner_groups.values():
@@ -428,7 +428,7 @@ class ResidualRepresentationTester:
     ]
 
     def results_to_dataframe(
-        self, pair: Optional[Tuple] = None
+        self, pair: tuple | None = None
     ) -> pd.DataFrame:
         """
         Return results as a DataFrame, sorted by |statistic| descending.
@@ -471,7 +471,7 @@ class ResidualRepresentationTester:
         )
         return df
 
-    def winning_representations(self) -> Dict:
+    def winning_representations(self) -> dict:
         """
         Return the winning representation per pair (primary criterion only).
 

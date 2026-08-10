@@ -110,3 +110,18 @@ twine upload dist/*
 After uploading, check the rendered project page on PyPI. The long description is taken
 from `README.md` at build time, so a README fix only reaches users once a release ships —
 fixing `main` does not change the live page.
+
+## Locking dependencies
+
+`scikit-learn` and `optbinning` carry environment markers that fork at Python
+3.13 (see the comment in `pyproject.toml`). Any lock tool that resolves for a
+single interpreter will therefore capture only one side of that fork:
+
+- **uv** — fine. `uv pip compile --universal` forks correctly and emits both.
+- **pip-tools** — not fine. `pip-compile` on 3.14 emits only the `>= '3.13'`
+  lines, and installing that lockfile on 3.12 leaves scikit-learn and optbinning
+  uninstalled, so predykt fails at import. Compile on 3.12 instead and you pin
+  optbinning 0.21, which cannot install on 3.13. Generate one lockfile per side
+  of the boundary, or use uv.
+- **Poetry** — untested.
+

@@ -47,7 +47,7 @@ import inspect
 import multiprocessing
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -63,7 +63,7 @@ from tqdm import tqdm
 _DEPTH_PARAM_NAMES = ("max_depth", "depth")
 
 
-def _resolve_depth_param(model_class, base_params: dict) -> Optional[str]:
+def _resolve_depth_param(model_class, base_params: dict) -> str | None:
     """
     Name of the depth hyperparameter for model_class, or None if it has none.
 
@@ -101,6 +101,11 @@ def _direction_sign(y: np.ndarray, values: np.ndarray) -> float:
     applied to every held-out fold. Returns +1 when the direction is
     indeterminate (single-class y), which leaves the values untouched.
     """
+    if values.ndim != 1:
+        # Without this, a stray class axis makes roc_auc_score raise ValueError,
+        # which the clause below swallows as "direction indeterminate" — turning
+        # a shape bug into a silent, permanent +1.
+        raise ValueError(f"expected 1-D interaction values, got {values.shape}")
     try:
         return 1.0 if roc_auc_score(y, values) >= 0.5 else -1.0
     except ValueError:
@@ -128,22 +133,52 @@ def _tree_interactions(model, X: pd.DataFrame):
 
 
 def _shap_interaction_values(model, X: pd.DataFrame, use_gpu: bool = False):
-    """SHAP interaction values as an (n, p, p) array for the positive class."""
+    """SHAP interaction values as an (n, p, p) array for the positive class.
+
+    The ``use_gpu`` path is not exercised in CI — no GPU hardware is available —
+    so treat it as unverified. Any failure inside it, including an unexpected
+    return type, is caught and falls back to the CPU explainer.
+    """
     if use_gpu:
         try:
             explainer = shap.explainers.GPUTree(
                 model, X, feature_perturbation="tree_path_dependent",
             )
-            interactions = explainer(X, interactions=True)
+            # .values, not the Explanation itself: Explanation defines no
+            # __array__, so np.asarray() below would build an object-dtype
+            # array of scalar Explanations and every downstream np.abs() would
+            # raise TypeError.
+            interactions = explainer(X, interactions=True).values
         except Exception:
-            warnings.warn("GPU explainer failed, falling back to CPU.")
+            warnings.warn("GPU explainer failed, falling back to CPU.", stacklevel=2)
             interactions = _tree_interactions(model, X)
     else:
         interactions = _tree_interactions(model, X)
 
-    # Binary classifiers may return one array per class
+    # shap < 0.45 returned a list with one (n, p, p) array per class; current
+    # shap returns a single array, with a trailing class axis whenever the model
+    # has more than one output. For a binary target that axis appears for
+    # sklearn's forests but not for XGBoost or LightGBM, so both forms have to
+    # be handled. Reduce to (n, p, p) for the positive class.
     if isinstance(interactions, list):
         interactions = interactions[1]
+    interactions = np.asarray(interactions)
+    if interactions.ndim == 4:
+        # The trailing axis is n_outputs, not "binary". A 3-class model also
+        # lands here, on every model family, and silently slicing index 1 would
+        # report one arbitrary class as if it were the positive one. This test
+        # targets a binary outcome by construction — the additive null draws
+        # y* ~ Binomial(1, p) — so refuse rather than answer the wrong question.
+        n_out = interactions.shape[-1]
+        if n_out != 2:
+            raise ValueError(
+                f"Multiclass targets are not supported: shap returned {n_out} "
+                f"output columns for this model. InteractionTester assumes a "
+                f"binary target, because the additive null it tests against is "
+                f"simulated as y* ~ Binomial(1, p). Reduce the problem to a "
+                f"one-vs-rest binary target and test each contrast separately."
+            )
+        interactions = interactions[:, :, :, 1]
     return interactions
 
 
@@ -260,7 +295,7 @@ class VoteResult:
     n_votes: int
     n_algorithms: int
     vote_ratio: float
-    algorithm_results: Dict[str, InteractionResult]
+    algorithm_results: dict[str, InteractionResult]
     unanimous: bool
     # Mean of oof_interaction_auc across algorithms — a genuinely different
     # quantity from any single result's AUC, so it keeps its own name.
@@ -348,9 +383,9 @@ class InteractionTester:
         n_folds: int = 5,
         use_gpu: bool = False,
         n_jobs: int = 1,
-        random_state: Optional[int] = 0,
-        fit_params: Optional[dict] = None,
-        n_seeds: Optional[int] = None,
+        random_state: int | None = 0,
+        fit_params: dict | None = None,
+        n_seeds: int | None = None,
     ):
         if n_seeds is not None:
             warnings.warn(
@@ -419,7 +454,7 @@ class InteractionTester:
     # =========================================================================
 
     def _fit_model(self, X: pd.DataFrame, y: np.ndarray, seed: int,
-                   fit_params: Optional[dict] = None):
+                   fit_params: dict | None = None):
         params = {**self.base_params, self.seed_param: seed}
         model = self.model_class(**params)
         model.fit(X, y, **(self.fit_params if fit_params is None else fit_params))
@@ -462,9 +497,9 @@ class InteractionTester:
         X: pd.DataFrame,
         y: np.ndarray,
         seed: int,
-        pair_indices: List[Tuple[int, int]],
-        fit_params: Optional[dict] = None,
-    ) -> Dict:
+        pair_indices: list[tuple[int, int]],
+        fit_params: dict | None = None,
+    ) -> dict:
         """
         Fit, compute SHAP interactions, and extract per-pair metrics.
 
@@ -493,10 +528,10 @@ class InteractionTester:
         self,
         X: pd.DataFrame,
         y: np.ndarray,
-        pair_indices: List[Tuple[int, int]],
-        signs: Dict[Tuple[int, int], float],
+        pair_indices: list[tuple[int, int]],
+        signs: dict[tuple[int, int], float],
         seed: int,
-    ) -> Dict:
+    ) -> dict:
         """
         Cross-fitted AUC of each pair's SHAP interaction term.
 
@@ -597,9 +632,9 @@ class InteractionTester:
         self,
         X: pd.DataFrame,
         y: np.ndarray,
-        pair_indices: List[Tuple[int, int]],
+        pair_indices: list[tuple[int, int]],
         seed: int,
-    ) -> Dict:
+    ) -> dict:
         """One row-bootstrap replicate: resample rows, refit, rescore."""
         rng = np.random.default_rng(seed)
         n = len(y)
@@ -617,9 +652,9 @@ class InteractionTester:
         self,
         X: pd.DataFrame,
         p_add: np.ndarray,
-        pair_indices: List[Tuple[int, int]],
+        pair_indices: list[tuple[int, int]],
         seed: int,
-    ) -> Dict:
+    ) -> dict:
         """One draw from the additive null: y* ~ Binomial(1, p_add), refit."""
         rng = np.random.default_rng(seed)
         y_star = rng.binomial(1, p_add).astype(int)
@@ -645,9 +680,9 @@ class InteractionTester:
         self,
         X: pd.DataFrame,
         y: np.ndarray,
-        feature_pairs: List[Tuple[str, str]],
-        seeds: Optional[np.ndarray] = None,
-    ) -> List[InteractionResult]:
+        feature_pairs: list[tuple[str, str]],
+        seeds: np.ndarray | None = None,
+    ) -> list[InteractionResult]:
         """
         Test multiple feature pairs against the additive null.
 
@@ -777,7 +812,7 @@ class InteractionTester:
         y: np.ndarray,
         n: int = 10,
         seed: int = 42,
-    ) -> List[Tuple[str, str]]:
+    ) -> list[tuple[str, str]]:
         """
         Quick screening: single-fit SHAP interactions to identify
         candidate pairs for full testing against the null.
@@ -802,8 +837,8 @@ class InteractionTester:
 
     def results_to_dataframe(
         self,
-        results: List[InteractionResult],
-        correction_method: Optional[str] = "fdr_bh",
+        results: list[InteractionResult],
+        correction_method: str | None = "fdr_bh",
     ) -> pd.DataFrame:
         """
         Convert results to DataFrame with optional multiple testing correction.
@@ -849,7 +884,7 @@ class InteractionTester:
     def plot_interaction_distribution(
         self,
         result: InteractionResult,
-        figsize: Tuple[int, int] = (10, 6),
+        figsize: tuple[int, int] = (10, 6),
     ):
         """Plot the null distribution against the observed statistic."""
         import matplotlib.pyplot as plt
@@ -900,7 +935,7 @@ class InteractionTester:
     def plot_convergence(
         self,
         result: InteractionResult,
-        figsize: Tuple[int, int] = (12, 5),
+        figsize: tuple[int, int] = (12, 5),
     ):
         """
         Plot running mean and std of the statistic across bootstrap replicates.
@@ -937,7 +972,7 @@ class InteractionTester:
         results_df: pd.DataFrame,
         top_n: int = 10,
         color: str = "#1f77b4",
-        figsize: Tuple[int, int] = (12, 8),
+        figsize: tuple[int, int] = (12, 8),
     ):
         """Plot top feature interactions by out-of-fold interaction AUC."""
         import matplotlib.pyplot as plt
@@ -998,14 +1033,14 @@ class InteractionVoter:
 
     def __init__(
         self,
-        algorithm_configs: Dict[str, Dict[str, Any]],
+        algorithm_configs: dict[str, dict[str, Any]],
         n_bootstrap: int = 100,
         n_null: int = 100,
         alpha: float = 0.05,
         use_gpu: bool = False,
         n_jobs: int = 1,
-        random_state: Optional[int] = 0,
-        n_seeds: Optional[int] = None,
+        random_state: int | None = 0,
+        n_seeds: int | None = None,
     ):
         if n_seeds is not None:
             warnings.warn(
@@ -1040,9 +1075,9 @@ class InteractionVoter:
         self,
         X: pd.DataFrame,
         y: np.ndarray,
-        feature_pairs: List[Tuple[str, str]],
-        seeds: Optional[np.ndarray] = None,
-    ) -> List[VoteResult]:
+        feature_pairs: list[tuple[str, str]],
+        seeds: np.ndarray | None = None,
+    ) -> list[VoteResult]:
         """
         Test each feature pair across all algorithms and tally votes.
 
@@ -1090,7 +1125,7 @@ class InteractionVoter:
             key=lambda v: (-v.n_votes, -v.mean_auc_across_algorithms),
         )
 
-    def summary(self, vote_results: List[VoteResult]) -> pd.DataFrame:
+    def summary(self, vote_results: list[VoteResult]) -> pd.DataFrame:
         """Summary DataFrame from vote results."""
         rows = []
         for vr in vote_results:
@@ -1114,8 +1149,8 @@ class InteractionVoter:
 
     def plot_vote_heatmap(
         self,
-        vote_results: List[VoteResult],
-        figsize: Tuple[int, int] = (14, 8),
+        vote_results: list[VoteResult],
+        figsize: tuple[int, int] = (14, 8),
     ):
         """Heatmap: algorithms (columns) x feature pairs (rows), colored by AUC."""
         import matplotlib.pyplot as plt

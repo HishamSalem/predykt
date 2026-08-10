@@ -1,5 +1,11 @@
 # predykt
 
+[![CI](https://github.com/HishamSalem/predykt/actions/workflows/ci.yml/badge.svg)](https://github.com/HishamSalem/predykt/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/predykt.svg)](https://pypi.org/project/predykt/)
+[![Python](https://img.shields.io/pypi/pyversions/predykt.svg)](https://pypi.org/project/predykt/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#)
+
 > ⚠️ **Alpha (0.x):** APIs may change between minor versions without deprecation. Pin a version in production.
 
 A Python toolkit for rigorous feature interaction analysis in machine learning models. It brings together cyclical optimal binning, SHAP interaction stability testing, residual representation testing, and seed robustness validation as a **layered protocol** for tabular ML - each tool strips out a different way a result can be an artifact of one arbitrary choice (one seed, one algorithm, one fit, one calendar encoding).
@@ -21,7 +27,7 @@ predykt addresses each of these failure modes with a dedicated, statistically gr
 pip install predykt
 ```
 
-**Core dependencies:** `numpy`, `numba`, `scikit-learn` (`>=1.1,<1.8`), `pandas`, `shap`, `scipy`, `statsmodels`, `optbinning`, `joblib`, `tqdm`
+**Core dependencies:** `numpy`, `numba`, `scikit-learn` (`>=1.6` on Python <=3.12, `>=1.1,<1.8` on 3.13+), `pandas`, `shap`, `scipy`, `statsmodels`, `optbinning`, `joblib`, `tqdm`
 
 **Optional extras:**
 
@@ -30,7 +36,9 @@ pip install "predykt[plot]"   # matplotlib + seaborn, for the plot_* methods
 pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the test suite
 ```
 
-> The `scikit-learn<1.8` pin is deliberate: optbinning calls `check_array(force_all_finite=...)`, an argument removed in scikit-learn 1.8.
+> **optbinning and scikit-learn are pinned as a pair, split on Python version.** optbinning up to 0.20.1 calls `check_array(force_all_finite=...)`, an argument removed in scikit-learn 1.8; 0.21.0 is the first release using `ensure_all_finite`. Constraining optbinning rather than capping scikit-learn is what keeps predykt installable next to a current scikit-learn on Python <=3.12. On 3.13+ that is not available: optbinning 0.20.1 and 0.21.0 both cap `ortools<9.12`, and ortools ships no wheel below 9.12 for 3.13+ and no sdist, so the newest installable optbinning there is 0.20.0 — which still needs the scikit-learn `<1.8` cap. Requiring `optbinning>=0.21` unconditionally would make predykt uninstallable on 3.13 and 3.14.
+>
+> **On Python 3.13+ you will see `FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite'` whenever binning runs.** It comes from optbinning 0.20.0 calling scikit-learn, not from predykt, and it is harmless. It is deliberately not suppressed: a filter broad enough to catch it would also hide the same warning raised by your own scikit-learn calls. It disappears when optbinning relaxes its ortools cap and the version fork above can be deleted.
 
 ## Modules
 
@@ -47,25 +55,80 @@ pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the
 
 ## Quick Start
 
+> **Prefer to just run it?** Every example below is available as an executable
+> notebook: [`examples/predykt_quickstart.ipynb`](examples/predykt_quickstart.ipynb)
+> — [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HishamSalem/predykt/blob/main/examples/predykt_quickstart.ipynb)
+> It runs top to bottom on a free Colab CPU in roughly three minutes.
+
 > **Note on runtime:** examples using large `n_null` / `n_bootstrap` / `n_seeds` or large `n_estimators` are illustrative of real production settings and can take minutes. For a fast smoke test, drop `n_null` and `n_bootstrap` to ~20 (and `SeedRobustnessValidator`'s `n_seeds` to ~20) and estimators to ~50. `InteractionTester` costs `1 + n_bootstrap + n_null + 1` model fits, each followed by a SHAP interaction pass — reduce `n_bootstrap` first, since it does not affect `robust`.
+
+### 0. The example dataset
+
+Every example below runs against this one synthetic credit-risk frame. It is
+built so `(age, income)` carries a **real** interaction — low income hurts the
+young far more than the old — while the other pairs are additive, giving the
+tools an honest negative control to fail to detect.
+
+```python
+import numpy as np
+import pandas as pd
+
+rng = np.random.default_rng(0)
+n = 4000
+
+age              = rng.integers(21, 71, n).astype(float)
+income           = np.round(rng.lognormal(10.9, 0.45, n), -2)
+utilization_rate = rng.beta(2, 5, n)
+delinquencies    = rng.poisson(0.4, n).astype(float)
+loan_amount      = np.round(income * rng.uniform(0.2, 1.5, n), -2)
+tenure           = rng.integers(0, 240, n).astype(float)
+hour_bin         = rng.integers(0, 24, n).astype(float)
+month            = rng.integers(1, 13, n).astype(float)
+
+# Default risk. The (age, income) term is a genuine interaction: low income
+# hurts the young far more than the old. Everything else enters additively,
+# so the other pairs are honest negative controls.
+z_age    = (age - age.mean()) / age.std()
+z_income = (np.log(income) - np.log(income).mean()) / np.log(income).std()
+
+# Risk also spikes overnight, 22:00-02:59 — a window that wraps midnight, so
+# no ordinary binner can express it as a single interval.
+night = ((hour_bin >= 22) | (hour_bin <= 2)).astype(float)
+
+logit = (-2.6
+         - 0.35 * z_age
+         - 0.55 * z_income
+         + 1.60 * utilization_rate
+         + 0.40 * delinquencies
+         + 1.00 * night                      # <- the wrap-around effect
+         - 1.10 * z_age * z_income)          # <- the interaction to recover
+
+y = pd.Series(rng.binomial(1, 1 / (1 + np.exp(-logit))), name="default")
+X = pd.DataFrame({
+    "age": age, "income": income, "utilization_rate": utilization_rate,
+    "delinquencies": delinquencies, "loan_amount": loan_amount,
+    "tenure": tenure, "hour_bin": hour_bin, "month": month,
+})
+
+# Categorical variant, used only by the adapter example in section 6.
+X_cat = X.assign(
+    state=rng.choice(["CA", "NY", "TX", "FL"], n),
+    segment=rng.choice(["prime", "near_prime", "subprime"], n),
+)
+```
+
+`X` is numeric-only, which `InteractionTester` requires. `X_cat` adds two string
+columns and is used only by the adapter example in section 6.
 
 ### 1. Cyclical Optimal Binning
 
 Standard binners treat hour 23 and hour 0 as maximally distant. `CyclicalBinner` treats the domain as circular and finds the IV-maximizing partition accordingly.
 
 ```python
-import numpy as np
 from predykt import CyclicalBinner
 
-# Simulate hour-of-day data with a fraud spike at night (22:00-02:00)
-rng = np.random.default_rng(42)
-n = 10_000
-hours = rng.integers(0, 24, size=n)
-fraud_prob = np.where((hours >= 22) | (hours <= 2), 0.15, 0.04)
-y = rng.binomial(1, fraud_prob)
-
 binner = CyclicalBinner(m=24, gamma=0.02, k_max=6)
-binner.fit(hours, y)
+binner.fit(X["hour_bin"].to_numpy(int), y)
 
 print(f"Optimal bins: {binner.n_bins_}")
 print(f"Split points: {binner.split_points_}")
@@ -76,8 +139,8 @@ print(binner.result_.summary())
 **Transform to WOE for a scorecard:**
 
 ```python
-binned      = binner.transform(hours)       # bin index
-woe_encoded = binner.transform_woe(hours)   # WOE directly (for LR scorecards)
+binned      = binner.transform(X["hour_bin"].to_numpy(int))       # bin index
+woe_encoded = binner.transform_woe(X["hour_bin"].to_numpy(int))   # WOE directly (for LR scorecards)
 woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 ```
 
@@ -299,6 +362,15 @@ print(tester.results_to_dataframe()[["representation", "rejected", "robust"]])
 **Precomputed residuals (Mode B):** if you already have OOF residuals, pass `Y_resid=` to skip Stage 1 cross-fitting.
 
 ```python
+from sklearn.model_selection import cross_val_predict
+
+# Any out-of-fold probability will do; this is just the cheapest illustration.
+oof_p = cross_val_predict(
+    GradientBoostingClassifier(n_estimators=200, random_state=42),
+    X, y, cv=5, method="predict_proba",
+)[:, 1]
+precomputed_residuals = y - oof_p
+
 tester.fit(
     feature_pairs=[("age", "income")],
     X=X, y=y,
@@ -318,7 +390,7 @@ adapter = CatBoostAdapter(
     cat_cols=["state", "segment"],
 )
 tester = ResidualRepresentationTester(model=adapter, n_folds=5)
-tester.fit(feature_pairs=[("age", "income")], X=X, y=y, representations=reps)
+tester.fit(feature_pairs=[("age", "income")], X=X_cat, y=y, representations=reps)
 ```
 
 ### 7. SHAP Interaction Analyzer
@@ -334,8 +406,12 @@ groups = {
     "temporal":     ["tenure", "hour_bin", "month"],
 }
 
+fitted_model = XGBClassifier(
+    n_estimators=200, max_depth=4, eval_metric="logloss", verbosity=0,
+).fit(X, y)
+
 analyzer = SHAPInteractionAnalyzer(interaction_groups=groups, layers=[1, 2, 3])
-analyzer.fit(model=fitted_model, X=X_test)
+analyzer.fit(model=fitted_model, X=X)
 
 l1 = analyzer.layer_1_group_total()        # sum within group
 l2 = analyzer.layer_2_net_group_effects()  # Layer 1 minus cross-group interactions

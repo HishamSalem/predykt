@@ -24,7 +24,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # 3.13 is not optional coverage. optbinning caps ortools <9.12 from
+        # 0.20.1 on, and no ortools below 9.12 ships a wheel for 3.13+, so the
+        # dependency pins fork at 3.13: <=3.12 resolves optbinning 0.21 with an
+        # uncapped scikit-learn, 3.13+ resolves optbinning 0.20.0 with
+        # scikit-learn <1.8. Without a 3.13 job the second branch has no
+        # coverage at all. When optbinning relaxes the ortools cap and both
+        # branches resolve alike, the fork in pyproject.toml can be deleted.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
         with:
