@@ -7,9 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-07-30
+## [0.2.0] - 2026-07-31
 
 ### Changed (BREAKING)
+
+- **Dependency floors raised: `scikit-learn>=1.6` and `optbinning>=0.21`**, replacing
+  `scikit-learn>=1.1,<1.8` and `optbinning>=0.17`. The old ceiling made predykt
+  uninstallable next to a current scikit-learn (1.9.0 at time of writing). On hosted
+  notebooks that is not cosmetic: pip downgrades the preinstalled scikit-learn and the
+  already-imported module stays in memory until the kernel restarts.
+
+  The cap was aimed at the wrong package. optbinning up to 0.20.1 calls
+  `check_array(force_all_finite=...)`, removed in scikit-learn 1.8; 0.21.0 is the first
+  release using `ensure_all_finite`, and it declares `scikit-learn>=1.6.0`. Constraining
+  optbinning instead of capping scikit-learn keeps predykt installable on current
+  environments. Verified against scikit-learn 1.6.1, 1.7.2 and 1.9.0.
+
+  Drops support for `scikit-learn` 1.1–1.5 and `optbinning` 0.17–0.20.
+
 
 - **`CyclicalBinner` WOE sign convention flipped** to `ln(%non-event / %event)`, matching
   [optbinning](https://github.com/guillermo-navas-palencia/optbinning)
@@ -81,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`examples/predykt_quickstart.ipynb`** — every README example as an executable
+  notebook, runnable on a free Colab CPU in about three minutes. A `FAST` switch
+  trades sample size and replicate counts against fidelity to the README's
+  production-scale settings.
+
+
 - `InteractionTester(n_null=...)` — replicates drawn from the additive null, which drive
   `p_value`. Default 100. The smallest attainable p-value is `1/(n_null + 1)`; a warning
   is emitted when `alpha` is below it, since `robust` could then never be `True`.
@@ -102,6 +123,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SHAP interaction values from scikit-learn ensembles were not reduced to the
+  positive class.** `_shap_interaction_values` documents a return of `(n, p, p)`,
+  but only handled the legacy list-per-class form. Binary classifiers also report
+  per-class values as a single `(n, p, p, n_classes)` array, and on current shap
+  that is the path scikit-learn's forests take — so a 4-D array reached the
+  callers and `InteractionTester` / `InteractionVoter` died on
+  `RandomForestClassifier` and `ExtraTreesClassifier` with
+
+      ValueError: shape mismatch: value array of shape (n, 2) could not be
+      broadcast to indexing result of shape (n,)
+
+  The cross-algorithm voting example in the README is a RandomForest + XGBoost +
+  LightGBM configuration, so it could not have run as published.
+  `SHAPInteractionAnalyzer.fit` already normalised both forms; the two modules
+  now agree.
+- **The wheel shipped a top-level `tasks/` directory into `site-packages`.**
+  `[tool.setuptools.packages.find]` defaults to `namespaces = true`, so it
+  discovered any root directory as a namespace package even without an
+  `__init__.py`. Replaced `exclude = ["tests*"]` with `include = ["predykt*"]`,
+  which cannot regress when a new root directory is added. Published 0.1.2 is
+  unaffected — `tasks/` postdates it. The sdist still carries `tests/` and
+  `docs/`, which is correct.
 - `HSICEstimator`: O(n³) → O(n²) per permutation. Centering is computed by mean
   subtraction and hoisted out of the permutation loop, and the trace of the product is read
   off as an elementwise sum. The statistic and the permutation p-value are unchanged —

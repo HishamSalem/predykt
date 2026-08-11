@@ -16,18 +16,18 @@ Var(Ỹᵢ) = p̂ᵢ(1 − p̂ᵢ), observation-specific, never constant.
 
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 import numpy as np
 import statsmodels.api as sm
-
 
 # =============================================================================
 # KERNEL HELPERS (used by HSICEstimator)
 # =============================================================================
 
-def _rbf_kernel(x: np.ndarray, bandwidth: Optional[float]) -> np.ndarray:
+def _rbf_kernel(x: np.ndarray, bandwidth: float | None) -> np.ndarray:
     x = np.asarray(x, dtype=float).ravel()
     dists_sq = (x[:, None] - x[None, :]) ** 2
     if bandwidth is None:
@@ -319,9 +319,9 @@ class HSICEstimator(Stage2Estimator):
     def __init__(
         self,
         n_permutations: int = 500,
-        bandwidth: Optional[float] = None,
+        bandwidth: float | None = None,
         alpha: float = 0.05,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
     ):
         self.n_permutations = n_permutations
         self.bandwidth = bandwidth

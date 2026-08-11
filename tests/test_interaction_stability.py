@@ -3,7 +3,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from lightgbm import LGBMClassifier
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    GradientBoostingClassifier,
+    RandomForestClassifier,
+)
+
 from predykt import InteractionTester, InteractionVoter
+from predykt.interaction_stability import _shap_interaction_values
 
 LGBM_PARAMS = {"n_estimators": 15, "max_depth": 3, "verbosity": -1}
 
@@ -441,6 +448,7 @@ class TestNullSurrogate:
     def test_depth_param_resolution(self):
         from sklearn.ensemble import RandomForestClassifier
         from xgboost import XGBClassifier
+
         from predykt.interaction_stability import _resolve_depth_param
 
         # XGBClassifier hides max_depth behind **kwargs; inspect alone misses it
@@ -574,3 +582,56 @@ class TestInteractionVoter:
             expected = sum(r.robust for r in v.algorithm_results.values())
             assert v.n_votes == expected
             assert v.unanimous == (v.n_votes == v.n_algorithms)
+
+
+# =============================================================================
+# Regression: the trailing class axis sklearn ensembles return
+# =============================================================================
+
+class TestShapInteractionShapeNormalisation:
+    """`_shap_interaction_values` promises (n, p, p) for the positive class.
+
+    Binary classifiers report per-class values in two different shapes: a list
+    of (n, p, p) arrays, or one (n, p, p, n_classes) array. Only the list form
+    was reduced, so sklearn's forests — which take the ndarray path on current
+    shap — leaked a 4-D array into the callers. InteractionVoter's own README
+    example uses RandomForestClassifier and died with
+
+        ValueError: shape mismatch: value array of shape (n, 2) could not be
+        broadcast to indexing result of shape (n,)
+    """
+
+    @pytest.mark.parametrize("model_class", [
+        RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier,
+        LGBMClassifier,
+    ])
+    def test_returns_three_dimensional_positive_class(self, numeric_data, model_class):
+        X, y = numeric_data
+        params = {"n_estimators": 10, "max_depth": 3, "random_state": 0}
+        if model_class is LGBMClassifier:
+            params["verbosity"] = -1
+        model = model_class(**params).fit(X, y)
+
+        out = _shap_interaction_values(model, X)
+
+        assert out.ndim == 3, f"expected (n, p, p), got {out.shape}"
+        assert out.shape == (len(X), X.shape[1], X.shape[1])
+        # Symmetry is the defining property of a SHAP interaction matrix; if the
+        # wrong axis had been sliced off this would not hold.
+        np.testing.assert_allclose(out, np.transpose(out, (0, 2, 1)), atol=1e-8)
+
+    def test_voter_runs_across_mixed_shape_families(self, numeric_data):
+        """End-to-end: the README's own RF + LGBM voting configuration."""
+        X, y = numeric_data
+        configs = {
+            "rf": {"model_class": RandomForestClassifier,
+                   "params": {"n_estimators": 10, "max_depth": 3},
+                   "seed_param": "random_state"},
+            "lgbm": {"model_class": LGBMClassifier,
+                     "params": LGBM_PARAMS, "seed_param": "random_state"},
+        }
+        voter = InteractionVoter(configs, n_bootstrap=3, n_null=4,
+                                 n_jobs=1, random_state=0)
+        summary = voter.summary(voter.vote(X, y, [("x0", "x1")]))
+        assert len(summary) == 1
+        assert {"rf_p_value", "lgbm_p_value"} <= set(summary.columns)

@@ -16,14 +16,14 @@ predykt.feature_binning. See CyclicalBinner's Notes for the details and for the
 0.2.0 sign change.
 """
 
+import time
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 from numba import njit
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
-from typing import Dict, Any, List
-from dataclasses import dataclass
-import time
-
 
 # =============================================================================
 # NUMBA CORE FUNCTIONS
@@ -85,7 +85,8 @@ def _solve_for_k(
                 ne_count = prefix_non_events[end] - prefix_non_events[start]
             else:
                 e_count = (prefix_events[m] - prefix_events[start]) + prefix_events[end]
-                ne_count = (prefix_non_events[m] - prefix_non_events[start]) + prefix_non_events[end]
+                ne_count = ((prefix_non_events[m] - prefix_non_events[start])
+                            + prefix_non_events[end])
             
             if e_count < e_min or ne_count < ne_min or e_count + ne_count < min_bin_size:
                 is_valid = False
@@ -273,7 +274,7 @@ class BinningResult:
         else:
             return "Suspicious (overfit?)"
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             'split_points': self.split_points.tolist(),
@@ -287,7 +288,7 @@ class BinningResult:
             'event_rates': self.event_rates.tolist(),
         }
     
-    def woe_table(self) -> List[Dict]:
+    def woe_table(self) -> list[dict]:
         """WOE table for scorecard documentation."""
         return [
             {
@@ -545,7 +546,7 @@ class CyclicalBinner(BaseEstimator, TransformerMixin):
         """Fit and transform in one step."""
         return self.fit(X, y).transform(X)
     
-    def get_woe_encoder(self) -> Dict[int, float]:
+    def get_woe_encoder(self) -> dict[int, float]:
         """
         Get WOE encoding dictionary.
         

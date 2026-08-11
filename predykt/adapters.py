@@ -34,7 +34,6 @@ Usage
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
 
 import pandas as pd
 from sklearn.base import clone as _sk_clone
@@ -51,7 +50,7 @@ class ModelAdapter(ABC):
     """
 
     model = None
-    fit_params: Dict = {}
+    fit_params: dict = {}
 
     @abstractmethod
     def clone(self) -> "ModelAdapter":
@@ -84,7 +83,7 @@ class SklearnAdapter(ModelAdapter):
         ``{"sample_weight": w}`` for any estimator).
     """
 
-    def __init__(self, model, fit_params: Optional[Dict] = None):
+    def __init__(self, model, fit_params: dict | None = None):
         self.model = model
         self.fit_params = dict(fit_params or {})
 
@@ -110,8 +109,8 @@ class PandasCategoricalAdapter(ModelAdapter):
         Extra keyword arguments forwarded to ``model.fit()``.
     """
 
-    def __init__(self, model, cat_cols: List[str],
-                 fit_params: Optional[Dict] = None):
+    def __init__(self, model, cat_cols: list[str],
+                 fit_params: dict | None = None):
         self.model = model
         self.cat_cols = list(cat_cols)
         self.fit_params = dict(fit_params or {})
@@ -152,8 +151,8 @@ class CatBoostAdapter(ModelAdapter):
         to ``cat_features`` (which this adapter supplies).
     """
 
-    def __init__(self, model, cat_cols: List[str], na_token: str = "missing",
-                 fit_params: Optional[Dict] = None):
+    def __init__(self, model, cat_cols: list[str], na_token: str = "missing",
+                 fit_params: dict | None = None):
         self.model = model
         self.cat_cols = list(cat_cols)
         self.na_token = na_token
@@ -165,7 +164,7 @@ class CatBoostAdapter(ModelAdapter):
                 "cat_features itself."
             )
 
-    def _effective_cats(self, X: pd.DataFrame) -> List[str]:
+    def _effective_cats(self, X: pd.DataFrame) -> list[str]:
         declared = [c for c in self.cat_cols if c in X.columns]
         stray = [
             c for c in X.select_dtypes(include="category").columns
@@ -194,7 +193,7 @@ class CatBoostAdapter(ModelAdapter):
         )
 
 
-def resolve_adapter(model, fit_params: Optional[Dict] = None) -> ModelAdapter:
+def resolve_adapter(model, fit_params: dict | None = None) -> ModelAdapter:
     """
     Normalise a user-supplied model into a ModelAdapter.
 

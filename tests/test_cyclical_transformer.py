@@ -1,6 +1,8 @@
 """CyclicalBinner: recovery of a circular pattern, validation, sklearn API."""
 import numpy as np
 import pytest
+from sklearn.exceptions import NotFittedError
+
 from predykt import CyclicalBinner
 
 
@@ -173,5 +175,5 @@ class TestValidation:
             CyclicalBinner(m=24).fit(hours, y[:-10])
 
     def test_transform_before_fit_raises(self):
-        with pytest.raises(Exception):  # sklearn NotFittedError
+        with pytest.raises(NotFittedError):
             CyclicalBinner(m=24).transform(np.array([1.0]))

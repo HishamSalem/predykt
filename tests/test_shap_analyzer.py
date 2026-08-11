@@ -3,6 +3,8 @@ validation, consistency warning, Mode A smoke."""
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.ensemble import RandomForestClassifier
+
 from predykt import SHAPInteractionAnalyzer
 
 GROUPS = {"g1": ["f0", "f1"], "g2": ["f2", "f3"]}
@@ -100,3 +102,58 @@ class TestModeA:
             model=model, X=X)
         assert an.layer_1_group_total().shape == (120, 2)
         assert an.layer_3_pure_main_effects().shape == (120, 4)
+
+
+# =============================================================================
+# Multiclass must be refused, not silently mis-answered
+# =============================================================================
+
+class TestMulticlassRefused:
+    """shap's trailing axis means "multi-output", not "binary".
+
+    A 3-class model produces (n, p, p, 3) on every model family. Taking index 1
+    would report one arbitrary class as though it were the positive one, and
+    return a plausible DataFrame while doing it. InteractionTester refuses such
+    input; these pin that SHAPInteractionAnalyzer agrees, so the two modules
+    cannot disagree about what they support.
+    """
+
+    GROUPS = {"g1": ["a", "b"], "g2": ["c", "d"]}
+
+    @staticmethod
+    def _data(seed=0, n=150, n_classes=3):
+        rng = np.random.default_rng(seed)
+        X = pd.DataFrame(rng.normal(size=(n, 4)), columns=["a", "b", "c", "d"])
+        return X, rng.integers(0, n_classes, n)
+
+    def test_mode_a_raises(self):
+        X, y3 = self._data()
+        model = RandomForestClassifier(n_estimators=8, max_depth=3,
+                                       random_state=0).fit(X, y3)
+        analyzer = SHAPInteractionAnalyzer(interaction_groups=self.GROUPS,
+                                           layers=[1, 2, 3])
+        with pytest.raises(ValueError, match="Multiclass"):
+            analyzer.fit(model=model, X=X)
+
+    def test_mode_b_raises(self):
+        import shap
+        X, y3 = self._data()
+        model = RandomForestClassifier(n_estimators=8, max_depth=3,
+                                       random_state=0).fit(X, y3)
+        explainer = shap.TreeExplainer(model)
+        analyzer = SHAPInteractionAnalyzer(interaction_groups=self.GROUPS,
+                                           layers=[1, 2, 3])
+        with pytest.raises(ValueError, match="Multiclass"):
+            analyzer.fit(shap_values=explainer.shap_values(X),
+                         shap_interaction_values=explainer.shap_interaction_values(X),
+                         X=X)
+
+    def test_binary_still_works(self):
+        X, _ = self._data()
+        rng = np.random.default_rng(1)
+        y = (rng.random(len(X)) < 1 / (1 + np.exp(-(2 * X.a * X.b)))).astype(int)
+        model = RandomForestClassifier(n_estimators=8, max_depth=3,
+                                       random_state=0).fit(X, y)
+        analyzer = SHAPInteractionAnalyzer(interaction_groups=self.GROUPS,
+                                           layers=[1, 2, 3]).fit(model=model, X=X)
+        assert analyzer.layer_2_net_group_effects().shape[1] == 2

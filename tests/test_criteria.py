@@ -3,10 +3,15 @@ import warnings
 
 import numpy as np
 import pytest
-from predykt import OLSEstimator, HSICEstimator, CustomEstimator
-from predykt import criteria
-from predykt.criteria import (Stage2Result, _center, _hsic_from_centered,
-                              _hsic_statistic, _rbf_kernel)
+
+from predykt import CustomEstimator, HSICEstimator, OLSEstimator, criteria
+from predykt.criteria import (
+    Stage2Result,
+    _center,
+    _hsic_from_centered,
+    _hsic_statistic,
+    _rbf_kernel,
+)
 
 rng = np.random.default_rng(42)
 

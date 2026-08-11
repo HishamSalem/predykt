@@ -1,10 +1,17 @@
 """ResidualRepresentationTester: modes, guards, power, categorical adapters."""
 import logging
+
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.ensemble import GradientBoostingClassifier
-from predykt import (ResidualRepresentationTester, OLSEstimator,
-                     CatBoostAdapter, PandasCategoricalAdapter)
+
+from predykt import (
+    CatBoostAdapter,
+    OLSEstimator,
+    PandasCategoricalAdapter,
+    ResidualRepresentationTester,
+)
 
 PAIR = [("num1", "num2")]
 REQUIRED_COLS = {"pair", "representation", "criterion", "beta",
@@ -130,3 +137,107 @@ class TestCategoricalAdapters:
             LGBMClassifier(n_estimators=30, verbosity=-1),
             cat_cols=["cat1", "cat2"]), df, y, reps)
         assert np.isfinite(res["pvalue"].iloc[0])
+
+
+# =============================================================================
+# refute() and winning_representations(): README-advertised, previously untested
+# =============================================================================
+
+def _fit_tester(binary_data, **kw):
+    df, y, _ = binary_data
+    X = df[["num1", "num2"]]
+    reps = pd.DataFrame({
+        "true_product": X["num1"] * X["num2"],   # the term actually in the DGP
+        "noise":        np.random.default_rng(7).normal(size=len(X)),
+    }, index=X.index)
+    t = ResidualRepresentationTester(
+        model=GradientBoostingClassifier(n_estimators=40, random_state=0),
+        criterion=[OLSEstimator()], n_folds=3, random_state=0,
+        **{"alpha": 0.05, **kw})
+    t.fit(feature_pairs=[("num1", "num2")], X=X, y=y, representations=reps)
+    return t
+
+
+class TestRefute:
+
+    def test_populates_refutation_columns(self, binary_data):
+        t = _fit_tester(binary_data)
+        before = t.results_to_dataframe()
+        assert before["empirical_pvalue"].isna().all(), "should be unset before refute()"
+
+        t.refute(n_permutations=40, n_bootstrap=20)
+        after = t.results_to_dataframe()
+
+        assert after["empirical_pvalue"].notna().all()
+        assert after["stability_score"].notna().all()
+        assert after["empirical_pvalue"].between(0, 1).all()
+        assert after["stability_score"].between(0, 1).all()
+
+    def test_discriminates_real_signal_from_noise(self, binary_data):
+        """The DGP term should survive refutation; pure noise should not."""
+        t = _fit_tester(binary_data)
+        t.refute(n_permutations=60, n_bootstrap=25)
+        r = t.results_to_dataframe().set_index("representation")
+
+        assert r.loc["true_product", "empirical_pvalue"] < 0.05
+        assert r.loc["true_product", "stability_score"] >= 0.8
+        assert r.loc["true_product", "robust"]
+
+        assert r.loc["noise", "empirical_pvalue"] > 0.05
+        assert not r.loc["noise", "robust"]
+
+    def test_robust_requires_rejected(self, binary_data):
+        """robust is a conjunction: it can never be True where rejected is False."""
+        t = _fit_tester(binary_data)
+        t.refute(n_permutations=30, n_bootstrap=15)
+        r = t.results_to_dataframe()
+        assert not (r["robust"] & ~r["rejected"]).any()
+
+    def test_before_fit_raises(self):
+        t = ResidualRepresentationTester(
+            model=GradientBoostingClassifier(n_estimators=5, random_state=0))
+        with pytest.raises(RuntimeError, match="fit"):
+            t.refute(n_permutations=5, n_bootstrap=5)
+
+
+class TestWinningRepresentations:
+
+    def test_picks_the_true_term(self, binary_data):
+        t = _fit_tester(binary_data)
+        win = t.winning_representations()
+
+        assert set(win) == {("num1", "num2")}
+        w = win[("num1", "num2")]
+        assert w["winner"] is True
+        assert w["representation"] == "true_product"
+        assert w["stage2_result"] is not None
+        assert w["pvalue_bh"] < 0.05
+
+    def test_largest_absolute_statistic_wins(self, binary_data):
+        """Documented rule: among survivors, max |statistic| wins."""
+        t = _fit_tester(binary_data)
+        df = t.results_to_dataframe()
+        survivors = df[df["rejected"]]
+        expected = survivors.loc[survivors["statistic"].abs().idxmax(), "representation"]
+        assert t.winning_representations()[("num1", "num2")]["representation"] == expected
+
+    def test_no_survivor_yields_empty_slot(self, binary_data):
+        """An alpha nothing can clear must give an empty slot, not a stale one.
+
+        The winner flag is decided inside fit(), so alpha has to be set there;
+        lowering it afterwards leaves the flag untouched.
+        """
+        t = _fit_tester(binary_data, alpha=1e-12)
+        assert not any(r["rejected"] for r in t.results_)
+
+        w = t.winning_representations()[("num1", "num2")]
+        assert w["winner"] is False
+        assert w["representation"] is None
+        assert w["stage2_result"] is None
+        assert w["rejected"] is False
+
+    def test_before_fit_raises(self):
+        t = ResidualRepresentationTester(
+            model=GradientBoostingClassifier(n_estimators=5, random_state=0))
+        with pytest.raises(RuntimeError, match="fit"):
+            t.winning_representations()

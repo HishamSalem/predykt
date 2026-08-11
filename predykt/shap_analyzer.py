@@ -23,9 +23,40 @@ THEORETICAL FOUNDATIONS:
 """
 
 import warnings
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
+
+
+def _reduce_to_positive_class(arr, base_ndim: int, name: str) -> np.ndarray:
+    """Drop shap's trailing output axis, refusing anything but a binary target.
+
+    shap appends that axis whenever the model has more than one output, so its
+    presence means "multi-output", not "binary". A 3-class model lands here on
+    every model family, and silently taking index 1 would report one arbitrary
+    class as if it were the positive one.
+
+    Parameters
+    ----------
+    arr : array-like
+        shap values (base_ndim=2) or shap interaction values (base_ndim=3).
+    base_ndim : int
+        Dimensionality of the single-output form.
+    name : str
+        Argument name, used in the error message.
+    """
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim == base_ndim + 1:
+        n_out = arr.shape[-1]
+        if n_out != 2:
+            raise ValueError(
+                f"Multiclass targets are not supported: {name} has {n_out} "
+                f"output columns. SHAPInteractionAnalyzer assumes a binary "
+                f"target. Reduce the problem to a one-vs-rest binary target, or "
+                f"pass values already sliced to the class you want to explain."
+            )
+        arr = arr[..., 1]
+    return arr
 
 
 class SHAPInteractionAnalyzer:
@@ -65,8 +96,8 @@ class SHAPInteractionAnalyzer:
 
     def __init__(
         self,
-        interaction_groups: Dict[str, List[str]],
-        layers: List[int] = None,
+        interaction_groups: dict[str, list[str]],
+        layers: list[int] = None,
     ):
         self.interaction_groups = interaction_groups
         self.layers = layers if layers is not None else [1, 2, 3]
@@ -81,14 +112,14 @@ class SHAPInteractionAnalyzer:
     # VALIDATION
     # =========================================================================
 
-    def _validate_groups(self, feature_names: List[str]) -> None:
+    def _validate_groups(self, feature_names: list[str]) -> None:
         """
         Enforce complete, non-overlapping group coverage.
         Layer 2 requires that every feature belongs to exactly one group.
         """
         feature_set = set(feature_names)
-        all_assigned: List[str] = []
-        for g, feats in self.interaction_groups.items():
+        all_assigned: list[str] = []
+        for feats in self.interaction_groups.values():
             all_assigned.extend(feats)
 
         assigned_set = set(all_assigned)
@@ -121,7 +152,7 @@ class SHAPInteractionAnalyzer:
                 "Each feature must belong to exactly one group."
             )
 
-    def _build_group_indices(self, feature_names: List[str]) -> Dict[str, List[int]]:
+    def _build_group_indices(self, feature_names: list[str]) -> dict[str, list[int]]:
         fn_list = list(feature_names)
         return {
             g: [fn_list.index(f) for f in feats]
@@ -236,9 +267,9 @@ class SHAPInteractionAnalyzer:
     def fit(
         self,
         model=None,
-        X: Optional[pd.DataFrame] = None,
-        shap_values: Optional[np.ndarray] = None,
-        shap_interaction_values: Optional[np.ndarray] = None,
+        X: pd.DataFrame | None = None,
+        shap_values: np.ndarray | None = None,
+        shap_interaction_values: np.ndarray | None = None,
     ) -> "SHAPInteractionAnalyzer":
         """
         Compute SHAP values and all requested layers.
@@ -268,13 +299,11 @@ class SHAPInteractionAnalyzer:
         -------
         self
         """
-        needs_interaction = any(l in self.layers for l in [2, 3])
+        needs_interaction = any(layer in self.layers for layer in (2, 3))
 
         if shap_values is not None:
             # Mode B
-            sv = np.asarray(shap_values, dtype=float)
-            if sv.ndim == 3:
-                sv = sv[:, :, 1]
+            sv = _reduce_to_positive_class(shap_values, 2, "shap_values")
             siv = None
             if needs_interaction:
                 if shap_interaction_values is None:
@@ -282,9 +311,8 @@ class SHAPInteractionAnalyzer:
                         "shap_interaction_values is required for layers 2 or 3. "
                         "Provide precomputed values or use Mode A (model + X)."
                     )
-                siv = np.asarray(shap_interaction_values, dtype=float)
-                if siv.ndim == 4:
-                    siv = siv[:, :, :, 1]
+                siv = _reduce_to_positive_class(
+                    shap_interaction_values, 3, "shap_interaction_values")
 
             n, p = sv.shape
             if X is not None:
@@ -304,18 +332,15 @@ class SHAPInteractionAnalyzer:
             sv_raw = explainer.shap_values(X)
             if isinstance(sv_raw, list):
                 sv_raw = sv_raw[1]
-            sv = np.asarray(sv_raw, dtype=float)
-            if sv.ndim == 3:
-                sv = sv[:, :, 1]
+            sv = _reduce_to_positive_class(sv_raw, 2, "shap_values")
 
             siv = None
             if needs_interaction:
                 siv_raw = explainer.shap_interaction_values(X)
                 if isinstance(siv_raw, list):
                     siv_raw = siv_raw[1]
-                siv = np.asarray(siv_raw, dtype=float)
-                if siv.ndim == 4:
-                    siv = siv[:, :, :, 1]
+                siv = _reduce_to_positive_class(
+                    siv_raw, 3, "shap_interaction_values")
 
         self.feature_names_ = feature_names
         self._validate_groups(feature_names)

@@ -12,3 +12,8 @@ predykt/_version.py
 # ML training artifacts
 catboost_info/
 
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

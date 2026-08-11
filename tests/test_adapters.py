@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
-from predykt import (CatBoostAdapter, PandasCategoricalAdapter,
-                     SklearnAdapter, ModelAdapter, resolve_adapter)
+
+from predykt import (
+    CatBoostAdapter,
+    ModelAdapter,
+    PandasCategoricalAdapter,
+    SklearnAdapter,
+    resolve_adapter,
+)
 
 
 @pytest.fixture

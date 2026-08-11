@@ -1,4 +1,4 @@
-﻿"""
+"""
 Seed Robustness Validator
 =========================
 Framework-agnostic diagnostic tool that determines whether a hyperparameter
@@ -41,12 +41,11 @@ from __future__ import annotations
 
 import hashlib
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 import numpy as np
 from scipy import stats
-
 
 # ---------------------------------------------------------------------------
 # Configuration & result containers
@@ -137,7 +136,7 @@ class SeedRobustnessValidator:
         n_seeds: int = 100,
         metric_name: str = "metric",
         higher_is_better: bool = True,
-        sigma_max: Optional[float] = None,
+        sigma_max: float | None = None,
         seed_start: int = 0,
         n_bootstrap: int = 10_000,
         alpha: float = 0.05,
@@ -147,6 +146,7 @@ class SeedRobustnessValidator:
                 f"n_seeds={n_seeds} is below 30. Std estimates will be unstable. "
                 "Recommend >=30 (ideally 100).",
                 UserWarning,
+                stacklevel=2,
             )
         self.eval_fn = eval_fn
         self.n_seeds = n_seeds
@@ -332,7 +332,8 @@ class SeedRobustnessValidator:
     def run(self) -> RobustnessReport:
         """Execute full seed robustness diagnostic. Returns RobustnessReport."""
         print(f"=== Seed Robustness Validation ({self.n_seeds} seeds) ===")
-        print(f"Metric: {self.metric_name} ({'higher' if self.higher_is_better else 'lower'} is better)\n")
+        direction = "higher" if self.higher_is_better else "lower"
+        print(f"Metric: {self.metric_name} ({direction} is better)\n")
 
         # Generate & evaluate
         seeds = self._generate_seeds()
@@ -401,7 +402,8 @@ class SeedRobustnessValidator:
         print(f"  SEED ROBUSTNESS REPORT: {report.metric_name}")
         print(sep)
 
-        print(f"\n{'Direction:':<30} {'higher is better' if report.higher_is_better else 'lower is better'}")
+        direction = "higher is better" if report.higher_is_better else "lower is better"
+        print(f"\n{'Direction:':<30} {direction}")
         print(f"{'Seeds evaluated:':<30} {len(report.seeds)}")
         print(f"{'sigma_max (threshold):':<30} {report.sigma_max:.6f}")
 
@@ -418,7 +420,8 @@ class SeedRobustnessValidator:
         print("\n--- Normality (Shapiro-Wilk) ---")
         print(f"{'Statistic:':<30} {report.shapiro_stat:.6f}")
         print(f"{'p-value:':<30} {report.shapiro_p:.4f}")
-        print(f"{'Normal (alpha=' + str(self.alpha) + '):':<30} {'YES' if report.is_normal else 'NO'}")
+        normal_label = f"Normal (alpha={self.alpha}):"
+        print(f"{normal_label:<30} {'YES' if report.is_normal else 'NO'}")
 
         print("\n--- Chi-Square Variance Test ---")
         print(f"{'H0: sigma^2 <= sigma_max^2'}")
@@ -443,7 +446,7 @@ class SeedRobustnessValidator:
         print(sep)
 
     def plot_diagnostics(
-        self, report: RobustnessReport, save_path: Optional[str] = None
+        self, report: RobustnessReport, save_path: str | None = None
     ) -> None:
         """
         Generate 4-panel diagnostic plot:
@@ -514,10 +517,12 @@ class SeedRobustnessValidator:
         ])
         ax4.hist(boot_stds, bins="auto", density=True, alpha=0.6, color="#DD8452",
                  edgecolor="white")
-        ax4.axvline(report.std, color="black", ls="--", lw=1.5, label=f"Observed std={report.std:.5f}")
+        ax4.axvline(report.std, color="black", ls="--", lw=1.5,
+                    label=f"Observed std={report.std:.5f}")
         ax4.axvline(report.bootstrap_std_ci_lower, color="green", ls=":", lw=1.5)
         ax4.axvline(report.bootstrap_std_ci_upper, color="green", ls=":", lw=1.5,
-                    label=f"95% CI [{report.bootstrap_std_ci_lower:.5f}, {report.bootstrap_std_ci_upper:.5f}]")
+                    label=(f"95% CI [{report.bootstrap_std_ci_lower:.5f}, "
+                           f"{report.bootstrap_std_ci_upper:.5f}]"))
         if report.sigma_max > 0:
             ax4.axvline(report.sigma_max, color="red", ls="-", lw=2,
                         label=f"σ_max={report.sigma_max:.5f}")
