@@ -8,7 +8,7 @@
 
 > ⚠️ **Alpha (0.x):** APIs may change between minor versions without deprecation. Pin a version in production.
 
-A Python toolkit for rigorous feature interaction analysis in machine learning models. It brings together cyclical optimal binning, SHAP interaction stability testing, residual representation testing, and seed robustness validation as a **layered protocol** for tabular ML - each tool strips out a different way a result can be an artifact of one arbitrary choice (one seed, one algorithm, one fit, one calendar encoding).
+A Python toolkit for rigorous feature interaction analysis in machine learning models. It brings together cyclical optimal binning, SHAP interaction stability testing, residual representation testing, and seed robustness validation as a **layered protocol** for tabular ML, where each tool strips out a different way a result can be an artifact of one arbitrary choice: one seed, one algorithm, one fit, one calendar encoding.
 
 ## Why predykt?
 
@@ -36,9 +36,7 @@ pip install "predykt[plot]"   # matplotlib + seaborn, for the plot_* methods
 pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the test suite
 ```
 
-> **optbinning and scikit-learn are pinned as a pair, split on Python version.** optbinning up to 0.20.1 calls `check_array(force_all_finite=...)`, an argument removed in scikit-learn 1.8; 0.21.0 is the first release using `ensure_all_finite`. Constraining optbinning rather than capping scikit-learn is what keeps predykt installable next to a current scikit-learn on Python <=3.12. On 3.13+ that is not available: optbinning 0.20.1 and 0.21.0 both cap `ortools<9.12`, and ortools ships no wheel below 9.12 for 3.13+ and no sdist, so the newest installable optbinning there is 0.20.0 — which still needs the scikit-learn `<1.8` cap. Requiring `optbinning>=0.21` unconditionally would make predykt uninstallable on 3.13 and 3.14.
->
-> **On Python 3.13+ you will see `FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite'` whenever binning runs.** It comes from optbinning 0.20.0 calling scikit-learn, not from predykt, and it is harmless. It is deliberately not suppressed: a filter broad enough to catch it would also hide the same warning raised by your own scikit-learn calls. It disappears when optbinning relaxes its ortools cap and the version fork above can be deleted.
+> **Why the version fork:** optbinning ≤0.20.1 calls an argument scikit-learn removed in 1.8, and optbinning ≥0.20.1 caps `ortools<9.12`, which has no wheel for Python 3.13+. Pinning the pair per Python version is what keeps predykt installable everywhere. On 3.13+ you will see a harmless `FutureWarning` about `force_all_finite` from optbinning. It is deliberately not suppressed, since a filter broad enough to catch it would hide the same warning from your own scikit-learn calls.
 
 ## Modules
 
@@ -57,16 +55,16 @@ pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the
 
 > **Prefer to just run it?** Every example below is available as an executable
 > notebook: [`examples/predykt_quickstart.ipynb`](examples/predykt_quickstart.ipynb)
-> — [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HishamSalem/predykt/blob/main/examples/predykt_quickstart.ipynb)
+>, [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HishamSalem/predykt/blob/main/examples/predykt_quickstart.ipynb)
 > It runs top to bottom on a free Colab CPU in roughly three minutes.
 
-> **Note on runtime:** examples using large `n_null` / `n_bootstrap` / `n_seeds` or large `n_estimators` are illustrative of real production settings and can take minutes. For a fast smoke test, drop `n_null` and `n_bootstrap` to ~20 (and `SeedRobustnessValidator`'s `n_seeds` to ~20) and estimators to ~50. `InteractionTester` costs `1 + n_bootstrap + n_null + 1` model fits, each followed by a SHAP interaction pass — reduce `n_bootstrap` first, since it does not affect `robust`.
+> **Note on runtime:** examples using large `n_null` / `n_bootstrap` / `n_seeds` or large `n_estimators` are illustrative of real production settings and can take minutes. For a fast smoke test, drop `n_null` and `n_bootstrap` to ~20 (and `SeedRobustnessValidator`'s `n_seeds` to ~20) and estimators to ~50. `InteractionTester` costs `1 + n_bootstrap + n_null + 1` model fits, each followed by a SHAP interaction pass. Reduce `n_bootstrap` first, since it does not affect `robust`.
 
 ### 0. The example dataset
 
 Every example below runs against this one synthetic credit-risk frame. It is
-built so `(age, income)` carries a **real** interaction — low income hurts the
-young far more than the old — while the other pairs are additive, giving the
+built so `(age, income)` carries a **real** interaction: low income hurts the
+young far more than the old, while the other pairs are additive, giving the
 tools an honest negative control to fail to detect.
 
 ```python
@@ -91,7 +89,7 @@ month            = rng.integers(1, 13, n).astype(float)
 z_age    = (age - age.mean()) / age.std()
 z_income = (np.log(income) - np.log(income).mean()) / np.log(income).std()
 
-# Risk also spikes overnight, 22:00-02:59 — a window that wraps midnight, so
+# Risk also spikes overnight, 22:00-02:59, a window that wraps midnight, so
 # no ordinary binner can express it as a single interval.
 night = ((hour_bin >= 22) | (hour_bin <= 2)).astype(float)
 
@@ -144,7 +142,7 @@ woe_encoded = binner.transform_woe(X["hour_bin"].to_numpy(int))   # WOE directly
 woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 ```
 
-**WOE sign convention:** `ln(%non-event / %event)`, matching [optbinning](https://github.com/guillermo-navas-palencia/optbinning) (Navas-Palencia 2020, §2.1) and Siddiqi's *Credit Risk Scorecards*. WOE is inversely related to the event rate, so a bin with an above-average event rate gets a **negative** WOE. Both conventions circulate in the credit-risk literature; the reason to pin one is that `FeatureBinningAnalyzer` delegates to optbinning directly, and mixing conventions inside a single scorecard silently sign-flips whichever features came from the odd one out. Information Value is unaffected — it is symmetric in the two factors.
+**WOE sign convention:** `ln(%non-event / %event)`, matching [optbinning](https://github.com/guillermo-navas-palencia/optbinning) (Navas-Palencia 2020, §2.1) and Siddiqi's *Credit Risk Scorecards*. WOE is inversely related to the event rate, so a bin with an above-average event rate gets a **negative** WOE. Both conventions circulate in the credit-risk literature; the reason to pin one is that `FeatureBinningAnalyzer` delegates to optbinning directly, and mixing conventions inside a single scorecard silently sign-flips whichever features came from the odd one out. Information Value is unaffected, it is symmetric in the two factors.
 
 > ⚠️ **Breaking change in 0.2.0.** `transform_woe()`, `get_woe_encoder()`, `woe_` and `result_.woe_table()` return the **opposite sign** to predykt ≤ 0.1.2, which used `ln(%event / %non-event)`. A scorecard fitted with `CyclicalBinner` WOE on ≤ 0.1.2 must be refit, or its coefficients on those features negated. `iv_`, `iv_smoothed` and the `iv` column of `summary()` are unchanged. See [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -184,19 +182,19 @@ print(df[["Feature_i", "Feature_j", "Mean_Abs_Interaction", "P_Value",
           "OOF_Interaction_AUC", "Robust"]])
 ```
 
-> `InteractionTester` requires **numeric-only** features — SHAP interaction values do not support native categorical splits. Encode categoricals (ordinal / target / WoE) before testing.
+> `InteractionTester` requires **numeric-only** features. SHAP interaction values do not support native categorical splits. Encode categoricals (ordinal / target / WoE) before testing.
 
-**How the null works.** Depth-1 stumps are additive by construction — a one-split tree is a function of a single feature, so no ensemble of them can carry an interaction. Fit those to `(X, y)`, draw `y* ~ Binomial(1, p_additive)`, refit the real model class on `(X, y*)`, and recompute `mean|Φ_ij|`. Repeating gives the distribution of interaction magnitude attributable to noise and to the estimator's own bias. The design follows the H-statistic's reference distribution in Friedman & Popescu (2008), §8.
+**How the null works.** Depth-1 stumps are additive by construction, a one-split tree is a function of a single feature, so no ensemble of them can carry an interaction. Fit those to `(X, y)`, draw `y* ~ Binomial(1, p_additive)`, refit the real model class on `(X, y*)`, and recompute `mean|Φ_ij|`. Repeating gives the distribution of interaction magnitude attributable to noise and to the estimator's own bias. The design follows the H-statistic's reference distribution in Friedman & Popescu (2008), §8.
 
 - `p_value` = `(#{null ≥ observed} + 1) / (n_null + 1)`, bounded below by `1/(n_null + 1)`
-- `robust` = `p_value < alpha` — **this is the decision rule**
+- `robust` = `p_value < alpha` (**this is the decision rule**)
 - `ci_low` / `ci_high` are a bootstrap **precision interval on the magnitude, descriptive only**. `mean|Φ_ij|` is strictly positive for any fitted tree ensemble, so this interval can never contain zero; `ci_low > 0` is a tautology that flags pure noise as significant. Do not use it as a criterion.
 
-> ⚠️ **The interval runs above the point estimate**, and on a weak pair it excludes it. Measured on the reference DGP: true pair `mean_abs_interaction` 0.8301 against `[0.8398, 1.0907]`; null pair 0.1660 against `[0.1751, 0.2621]` — bootstrap centres +13% and +27% high. This is a property of the resampling scheme, not of the sampling distribution: drawing rows with replacement duplicates them, and a tree ensemble fits duplicated rows more sharply, inflating `mean|Φ|`. The effect is larger on the weak pair, which is the signature of noise-fitting dominating when the true effect is near zero. Read the pair as the **spread of the bootstrap distribution**, not as an interval centred on the observed value. `robust` is unaffected — it keys off `p_value`, which compares full-data fits against full-data fits.
+> ⚠️ **The interval runs above the point estimate**, and on a weak pair it excludes it. Measured on the reference DGP: true pair `mean_abs_interaction` 0.8301 against `[0.8398, 1.0907]`; null pair 0.1660 against `[0.1751, 0.2621]`. The bootstrap centres +13% and +27% high. This is a property of the resampling scheme, not of the sampling distribution: drawing rows with replacement duplicates them, and a tree ensemble fits duplicated rows more sharply, inflating `mean|Φ|`. The effect is larger on the weak pair, which is the signature of noise-fitting dominating when the true effect is near zero. Read the pair as the **spread of the bootstrap distribution**, not as an interval centred on the observed value. `robust` is unaffected, because it keys off `p_value`, which compares full-data fits against full-data fits.
 
 > ⚠️ **Calibration limit.** The surrogate approximates the additive null; it is not the true null. The p-value is calibrated only insofar as depth-1 stumps capture the additive part of the data. Treat it as a principled screen with a real null, not an exact test.
 
-**`oof_interaction_auc` is cross-fitted.** The interaction term's AUC is computed out of fold — each fold fits on its training rows and explains only the held-out rows — so no row is scored by a model that saw it. Scoring in-sample is circular: on a DGP where `(x2, x3)` have main effects but **no** interaction, in-sample AUC read 0.72; cross-fitted it reads 0.53, and the truly-interacting pair reads 0.78. The old `max(auc, 1 - auc)` floor is also gone: it guaranteed ≥ 0.5 by construction, so the metric could never report "no discrimination" even when that was the truth. The direction is fixed **once** on the full-data fit and reused for every fold — choosing it per fold would reintroduce the same selection bias.
+**`oof_interaction_auc` is cross-fitted.** The interaction term's AUC is computed out of fold. Each fold fits on its training rows and explains only the held-out rows, so no row is scored by a model that saw it. Scoring in-sample is circular: on a DGP where `(x2, x3)` have main effects but **no** interaction, in-sample AUC read 0.72; cross-fitted it reads 0.53, and the truly-interacting pair reads 0.78. The old `max(auc, 1 - auc)` floor is also gone: it guaranteed ≥ 0.5 by construction, so the metric could never report "no discrimination" even when that was the truth. The direction is fixed **once** on the full-data fit and reused for every fold, choosing it per fold would reintroduce the same selection bias.
 
 > This AUC answers "does this interaction term *alone* rank-order the target," which is narrower than "does adding this term improve the model." A cross-fitted ΔAUC would answer the latter and is the more standard choice; it is a roadmap item, not implemented. Note that DeLong et al. (1988) assumes fixed models, which cross-fitted predictions violate, so a paired bootstrap over folds would be the safer inference for this design.
 
@@ -205,7 +203,7 @@ tester.plot_interaction_distribution(results[0])   # requires predykt[plot]
 tester.plot_convergence(results[0])                # was n_bootstrap enough?
 ```
 
-> **Removed in 0.2.0: `instability_score`.** It measured the proportion of seeds on which the signed mean interaction flipped direction, and had no power at all under a deterministic learner — with XGBoost at `subsample=1.0` every seed produces a bit-identical fit, so the score was exactly `0.0` for every pair including pure noise and `robust` was `True` for everything. The statistic was also signed, and SHAP interaction values are roughly sign-symmetric across rows, so the signed mean discarded ~95% of the magnitude it was meant to measure. See [`CHANGELOG.md`](CHANGELOG.md) for the migration.
+> **Removed in 0.2.0: `instability_score`.** It had no power under a deterministic learner, and reported `robust=True` for pure noise. See [`CHANGELOG.md`](CHANGELOG.md) for the migration.
 
 ### 3. Cross-Algorithm Voting
 
@@ -288,7 +286,7 @@ validator.plot_diagnostics(report)   # requires predykt[plot]
 
 ### 5. Feature Binning IV Uplift
 
-Quick screening for feature pair interactions using OptBinning's 2D binning. The uplift heuristic (`IV_2D - (IV_1 + IV_2)`) identifies pairs where joint information exceeds the sum of marginal information — a signal worth investigating further.
+Quick screening for feature pair interactions using OptBinning's 2D binning. The uplift heuristic (`IV_2D - (IV_1 + IV_2)`) identifies pairs where joint information exceeds the sum of marginal information. This is a signal worth investigating further.
 
 ```python
 from predykt import FeatureBinningAnalyzer
@@ -314,7 +312,9 @@ print(table)
 
 After confirming an interaction pair is stable, `ResidualRepresentationTester` asks: does a specific engineered transformation of that pair explain structure the base model missed?
 
-This is a **residual specification test**, not an application of Frisch–Waugh–Lovell (FWL) or Double/Debiased ML (DML). Those frameworks recover an unbiased coefficient for a causal or structural parameter by residualizing *both* the outcome and the treatment/regressor of interest against the same conditioning set; that equivalence is what their proofs establish. Here, only the outcome is residualized — Stage 1 computes out-of-fold residuals Ỹ = y − p̂ via K-fold cross-fitting (a standard nested-CV procedure, sharing only its cross-fitting mechanics with Chernozhukov et al. 2018's DML, not its Neyman-orthogonal-score guarantees). Stage 2 regresses Ỹ on the raw candidate feature Tₖ and tests H₀: β₁ = 0. This is closer in lineage to Ramsey's RESET test (1969) and partial / component-plus-residual plots (Ezekiel 1924) than to FWL/DML, and it makes no causal claim. **A significant result provides evidence that Tₖ correlates with structure the base model did not capture** — it is a feature-screening signal, not a partialled-regression coefficient and not a proof of causal necessity. Because the treatment side is never residualized, this procedure has none of DML's protection against Stage-1 misspecification: validity depends entirely on the base model being reasonably well-specified.
+Stage 1 computes out-of-fold residuals `Ỹ = y − p̂` by K-fold cross-fitting. Stage 2 regresses `Ỹ` on the candidate representation `Tₖ` and tests `H₀: β₁ = 0`.
+
+> **This is a feature-screening diagnostic, not a causal estimate.** A significant result is evidence that `Tₖ` correlates with structure the base model missed. Only the outcome is residualized, so validity depends on the base model being reasonably well specified. See the `predykt.residual_test` module docstring for the full statistical discussion and how this differs from FWL / DML. (The legacy `predykt.fwl` alias is deprecated for this reason and is removed in v0.4.0.)
 
 ```python
 import numpy as np
@@ -433,17 +433,15 @@ print(group_comparison)
 
 ## Design Decisions
 
-**Why simulate an additive null instead of permuting on a fixed model, or refitting across seeds?** Permuting on a fixed model tests whether the interaction is non-zero for that one fit, which is not the question. Refitting across seeds — what predykt ≤ 0.1.2 did — tests whether the interaction survives model randomness, but that has no power whenever the learner is deterministic: at `subsample=1.0` every seed gives a bit-identical fit, so the spread is exactly zero and every pair looks perfectly stable, noise included. Neither approach compares the interaction against anything. Simulating outcomes from an *additive* surrogate builds a reference distribution for "how big would this interaction look if there were no interaction at all," which is the comparison that licenses the word significant. Its cost is that the p-value inherits the surrogate's approximation error — stated plainly in §2 and in the module docstring.
+**Why simulate an additive null instead of permuting on a fixed model, or refitting across seeds?** Permuting on a fixed model tests whether the interaction is non-zero for that one fit, which is not the question. Refitting across seeds, which is what predykt ≤ 0.1.2 did, tests whether the interaction survives model randomness, but that has no power whenever the learner is deterministic: at `subsample=1.0` every seed gives a bit-identical fit, so the spread is exactly zero and every pair looks perfectly stable, noise included. Neither approach compares the interaction against anything. Simulating outcomes from an *additive* surrogate builds a reference distribution for "how big would this interaction look if there were no interaction at all," which is the comparison that licenses the word significant. Its cost is that the p-value inherits the surrogate's approximation error, stated plainly in §2 and in the module docstring.
 
 **Why Numba for CyclicalBinner?** Exhaustive enumeration of all k-partitions of a circular domain of cardinality m is O(C(m, k)) per k. For m=24, k=6 that's C(24,6) = 134,596 partitions. Numba JIT brings this from seconds to milliseconds. The method is univariate and binary-target only; it is designed for low-cardinality circular domains (hours, months), not high-cardinality fields.
 
-**Why the 95/95 tolerance interval in SeedRobustnessValidator?** A confidence interval on the mean tells you where the average seed lands. A tolerance interval tells you where individual seed runs land — which is what matters when you deploy a model trained on a single seed. The 95/95 interval follows the ISO 16269-6 convention for this use case.
+**Why the 95/95 tolerance interval in SeedRobustnessValidator?** A confidence interval on the mean tells you where the average seed lands. A tolerance interval tells you where individual seed runs land, which is what matters when you deploy a model trained on a single seed. The 95/95 interval follows the ISO 16269-6 convention for this use case.
 
 **Why HC3 robust standard errors in OLSEstimator?** For binary targets, residuals Ỹ = y − p̂ have observation-specific variance p̂(1−p̂). OLS with homoskedastic standard errors is misspecified. HC3 (MacKinnon & White 1985) corrects this and is the default.
 
 **Why HSIC alongside OLS?** OLS only detects linear association. HSIC (Hilbert–Schmidt Independence Criterion) is a kernel-based nonparametric test that detects any dependence structure, including nonlinear and non-monotone relationships. Running both gives a more complete picture of whether a representation carries signal.
-
-**Why isn't Residual Representation Testing called FWL or DML?** Because it only residualizes one side of the regression (the outcome). FWL and DML derive their guarantees from residualizing both the outcome and the treatment/regressor against the same conditioning set; that two-sided residualization is what their equivalence and orthogonality proofs actually require. Tₖ here is a deterministic function of X, so residualizing it against X is degenerate (T̃ₖ ≡ 0) — there is no valid second partialled regressor to construct. What's implemented is a one-sided residual-on-feature test: legitimate as a feature-screening diagnostic, but it should not be presented as recovering an FWL-equivalent coefficient or a DML-style debiased causal estimate, since neither guarantee is being invoked.
 
 ## Testing
 
@@ -452,7 +450,7 @@ pip install -e ".[test,plot]"
 pytest -q
 ```
 
-CI runs the suite on Python 3.10 / 3.11 / 3.12 on every push.
+CI runs the suite on Python 3.10 / 3.11 / 3.12 / 3.13 on every push.
 
 ## License
 
@@ -461,7 +459,7 @@ MIT
 ## Citation
 
 If you use predykt in research or production systems, please cite it. Machine-readable
-metadata lives in [`CITATION.cff`](CITATION.cff) — GitHub renders a **Cite this repository**
+metadata lives in [`CITATION.cff`](CITATION.cff). GitHub renders a **Cite this repository**
 button from it, which will give you BibTeX or APA directly.
 
 ```bibtex
@@ -478,7 +476,7 @@ button from it, which will give you BibTeX or APA directly.
 
 ## Changelog
 
-See [`CHANGELOG.md`](CHANGELOG.md). **0.2.0 contains breaking changes** — the
+See [`CHANGELOG.md`](CHANGELOG.md). **0.2.0 contains breaking changes**: the
 `CyclicalBinner` WOE sign convention and several `InteractionTester` field names.
 
 ## Contributing
