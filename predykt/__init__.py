@@ -13,7 +13,6 @@ from .criteria import (
     Stage2Result,
 )
 from .cyclical_transformer import CyclicalBinner
-from .feature_binning import FeatureBinningAnalyzer
 from .interaction_stability import InteractionTester, InteractionVoter
 from .residual_test import ResidualRepresentationTester
 from .seed_robustness import SeedRobustnessValidator
@@ -32,7 +31,6 @@ except ImportError:  # no build has run (fresh clone / editable dev checkout)
 __author__ = "Hisham Salem"
 
 __all__ = [
-    "FeatureBinningAnalyzer",
     "CyclicalBinner",
     "InteractionTester",
     "InteractionVoter",

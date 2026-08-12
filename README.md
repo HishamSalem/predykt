@@ -27,7 +27,7 @@ predykt addresses each of these failure modes with a dedicated, statistically gr
 pip install predykt
 ```
 
-**Core dependencies:** `numpy`, `numba`, `scikit-learn` (`>=1.6` on Python <=3.12, `>=1.1,<1.8` on 3.13+), `pandas`, `shap`, `scipy`, `statsmodels`, `optbinning`, `joblib`, `tqdm`
+**Core dependencies:** `numpy`, `pandas`, `scikit-learn`, `scipy`, `shap`, `statsmodels`, `numba`, `joblib`, `tqdm`
 
 **Optional extras:**
 
@@ -36,7 +36,9 @@ pip install "predykt[plot]"   # matplotlib + seaborn, for the plot_* methods
 pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the test suite
 ```
 
-> **Why the version fork:** optbinning ≤0.20.1 calls an argument scikit-learn removed in 1.8, and optbinning ≥0.20.1 caps `ortools<9.12`, which has no wheel for Python 3.13+. Pinning the pair per Python version is what keeps predykt installable everywhere. On 3.13+ you will see a harmless `FutureWarning` about `force_all_finite` from optbinning. It is deliberately not suppressed, since a filter broad enough to catch it would hide the same warning from your own scikit-learn calls.
+> **optbinning is no longer a dependency as of 0.3.0.** It backed only `FeatureBinningAnalyzer`, which has been removed (see section 5). This matters beyond install size: optbinning caps `ortools<9.12` from 0.20.1 on, and no `ortools` below 9.12 ships a wheel for Python 3.13+, which is what forced 0.2.0's `scikit-learn<1.8` cap on 3.13+ and the version fork that came with it. Dropping the dependency removes that transitive ceiling entirely, so the base install is no longer capped by predykt on any supported Python. (On 3.10 the newest scikit-learn is 1.7.x regardless, because scikit-learn 1.8 itself requires Python >=3.11.)
+>
+> **`matplotlib` also leaves the base install**, because optbinning had been pulling it in transitively. `plot_diagnostics`, `plot_interaction_distribution` and the other `plot_*` methods now need `pip install "predykt[plot]"`, which was always the documented way to get them.
 
 ## Modules
 
@@ -46,7 +48,6 @@ pip install "predykt[test]"   # lightgbm, xgboost, catboost + pytest, to run the
 | `InteractionTester`            | SHAP interaction testing against a simulated additive null                                 |
 | `InteractionVoter`             | Cross-algorithm voting to distinguish data interactions from algorithm artifacts          |
 | `SeedRobustnessValidator`      | Statistical validation of hyperparameter config robustness across seeds                   |
-| `FeatureBinningAnalyzer`       | IV uplift screening for feature pair interactions via OptBinning                          |
 | `ResidualRepresentationTester` | Residual-based test of whether an engineered representation explains base-model residuals |
 | `SHAPInteractionAnalyzer`      | Three-layer SHAP attribution corrected for collinearity and cross-group aliasing          |
 | `CatBoostAdapter` / `PandasCategoricalAdapter` | Let the residual tester cross-fit native-categorical models (CatBoost / LightGBM / XGBoost) |
@@ -142,7 +143,7 @@ woe_encoded = binner.transform_woe(X["hour_bin"].to_numpy(int))   # WOE directly
 woe_table   = binner.result_.woe_table()    # WOE lookup table for documentation
 ```
 
-**WOE sign convention:** `ln(%non-event / %event)`, matching [optbinning](https://github.com/guillermo-navas-palencia/optbinning) (Navas-Palencia 2020, §2.1) and Siddiqi's *Credit Risk Scorecards*. WOE is inversely related to the event rate, so a bin with an above-average event rate gets a **negative** WOE. Both conventions circulate in the credit-risk literature; the reason to pin one is that `FeatureBinningAnalyzer` delegates to optbinning directly, and mixing conventions inside a single scorecard silently sign-flips whichever features came from the odd one out. Information Value is unaffected, it is symmetric in the two factors.
+**WOE sign convention:** `ln(%non-event / %event)`, matching [optbinning](https://github.com/guillermo-navas-palencia/optbinning) (Navas-Palencia 2020, §2.1) and Siddiqi's *Credit Risk Scorecards*. WOE is inversely related to the event rate, so a bin with an above-average event rate gets a **negative** WOE. Both conventions circulate in the credit-risk literature; the reason to pin this one is that it is the convention in the sources cited above, and mixing conventions inside a single scorecard silently sign-flips whichever features came from the odd one out. optbinning uses the same convention, so the two agree. Information Value is unaffected, it is symmetric in the two factors.
 
 > ⚠️ **Breaking change in 0.2.0.** `transform_woe()`, `get_woe_encoder()`, `woe_` and `result_.woe_table()` return the **opposite sign** to predykt ≤ 0.1.2, which used `ln(%event / %non-event)`. A scorecard fitted with `CyclicalBinner` WOE on ≤ 0.1.2 must be refit, or its coefficients on those features negated. `iv_`, `iv_smoothed` and the `iv` column of `summary()` are unchanged. See [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -284,29 +285,35 @@ validator.plot_diagnostics(report)   # requires predykt[plot]
 
 > **Note on `sigma_max`:** if not set, defaults to 1% of the observed mean, a conservative auto-default. Override it with a domain-informed threshold. In credit scoring, 0.5% AUC std (`sigma_max=0.005`) is a reasonable production stability requirement.
 
-### 5. Feature Binning IV Uplift
+### 5. IV uplift screening (recipe, not a module)
 
-Quick screening for feature pair interactions using OptBinning's 2D binning. The uplift heuristic (`IV_2D - (IV_1 + IV_2)`) identifies pairs where joint information exceeds the sum of marginal information. This is a signal worth investigating further.
+`FeatureBinningAnalyzer` was removed in 0.3.0. It was 214 lines of pass-through around one subtraction, `IV_2D - (IV_1 + IV_2)`, and it made optbinning, along with optbinning's `ortools<9.12` ceiling, a requirement for every user. If you want a screen that needs no extra dependency, `InteractionTester.get_top_n_interactions` in section 2 does one by SHAP interaction magnitude. It is a different screen, not a replacement: IV uplift needs no model and so cannot inherit a model's inductive bias.
+
+If you specifically want the IV-uplift heuristic, it is short enough to write directly:
 
 ```python
-from predykt import FeatureBinningAnalyzer
+# pip install optbinning
+# Verified against optbinning 0.20.0 / scikit-learn 1.7.2 on 2026-08-12.
+# No CI job runs this, since predykt no longer depends on optbinning.
+from optbinning import OptimalBinning, OptimalBinning2D
 
-analyzer = FeatureBinningAnalyzer(X, y)
+def iv_1d(x, y):
+    ob = OptimalBinning(solver="cp").fit(x, y)
+    return ob.binning_table.build()["IV"].max()
 
-feature_pairs = [
-    ("age", "income"),
-    ("loan_amount", "tenure"),
-    ("utilization_rate", "delinquencies"),
-]
+def iv_uplift(X, y, f1, f2):
+    ob2 = OptimalBinning2D(name_x=f1, name_y=f2, solver="cp")
+    ob2.fit(X[f1].values, X[f2].values, y)
+    iv_2d = ob2.binning_table.build()["IV"].max()
+    return iv_2d - (iv_1d(X[f1], y) + iv_1d(X[f2], y))
 
-results = analyzer.analyze_feature_combinations(feature_pairs)
-print(analyzer.get_top_combinations())
-
-table = analyzer.get_binning_details("age", "income")
-print(table)
+for f1, f2 in [("age", "income"), ("loan_amount", "tenure")]:
+    print(f1, f2, round(iv_uplift(X, y, f1, f2), 4))
 ```
 
-> **Interpretation note:** IV uplift is a screening heuristic, not a formal interaction test. High-uplift pairs are candidates for the more rigorous `InteractionTester` / `InteractionVoter` pipeline.
+> Verified against optbinning 0.20.0 and scikit-learn 1.7.2 on 2026-08-12. Nothing in CI runs this block, since predykt no longer depends on optbinning.
+
+> **This is a heuristic with no null distribution behind it.** Uplift is not evidence of an interaction. Treat high-uplift pairs as candidates for `InteractionTester` / `InteractionVoter`, which is what the rest of this library is for.
 
 ### 6. Residual Representation Testing
 
@@ -450,7 +457,7 @@ pip install -e ".[test,plot]"
 pytest -q
 ```
 
-CI runs the suite on Python 3.10 / 3.11 / 3.12 / 3.13 on every push.
+CI runs the suite on Python 3.10 / 3.11 / 3.12 / 3.13 on every push, plus a job that installs with no extras to check the base install resolves and passes against an unconstrained scikit-learn.
 
 ## License
 

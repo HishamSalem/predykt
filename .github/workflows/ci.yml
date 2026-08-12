@@ -24,13 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.13 is not optional coverage. optbinning caps ortools <9.12 from
-        # 0.20.1 on, and no ortools below 9.12 ships a wheel for 3.13+, so the
-        # dependency pins fork at 3.13: <=3.12 resolves optbinning 0.21 with an
-        # uncapped scikit-learn, 3.13+ resolves optbinning 0.20.0 with
-        # scikit-learn <1.8. Without a 3.13 job the second branch has no
-        # coverage at all. When optbinning relaxes the ortools cap and both
-        # branches resolve alike, the fork in pyproject.toml can be deleted.
+        # 3.13 covers the newest interpreter predykt claims to support.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -42,4 +36,50 @@ jobs:
       - name: Install package with test extras
         run: pip install -e ".[test]"
       - name: Run test suite
+        run: pytest -q --tb=short
+
+  base-install:
+    # Every job above installs .[test], which pulls optbinning and, on 3.13+,
+    # pins scikit-learn <1.8. So none of them exercise what a plain
+    # `pip install predykt` actually resolves. Since 0.3.0 that is an
+    # unconstrained scikit-learn, which predykt's own code has never been run
+    # against. This job is the only place that is checked.
+    #
+    # Narrower than the main matrix on purpose: this job exists to exercise a
+    # NEW scikit-learn, and 3.10 cannot reach one — scikit-learn 1.8 requires
+    # Python >=3.11, so a 3.10 base install resolves 1.7.x no matter what we
+    # pin. The main matrix already covers 3.10 and 3.11.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Narrower than the main matrix on purpose: 3.12 and 3.13 are the
+        # versions where an unconstrained scikit-learn resolves to 1.8+.
+        # On 3.10/3.11 the newest scikit-learn is capped by its own
+        # requires_python, so those add no coverage this job exists for.
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # .[test] no longer pulls optbinning, so this is the full suite's
+      # dependency set with nothing extra — no hand-copied package list to drift
+      # from pyproject, and the xgboost fork for old Pythons is respected.
+      - name: Install with test extras only
+        run: pip install ".[test]"
+      - name: Report the resolved scikit-learn
+        run: |
+          python -c "import predykt, sklearn; print('predykt', predykt.__version__, '| scikit-learn', sklearn.__version__)"
+          python -c "import predykt, sys; assert 'optbinning' not in sys.modules, 'predykt imports optbinning at import time'"
+      - name: Fail if optbinning leaked into a base install
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          if importlib.util.find_spec("optbinning") is not None:
+              sys.exit("optbinning is installed; base install must not pull it")
+          PY
+      - name: Run the suite
         run: pytest -q --tb=short

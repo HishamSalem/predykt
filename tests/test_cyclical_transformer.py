@@ -108,57 +108,46 @@ class TestWOESignConvention:
         assert [r["woe"] for r in b.result_.woe_table()] == \
             pytest.approx(b.woe_.tolist())
 
-    def test_directional_agreement_with_optbinning(self):
-        """Same non-circular data through both binners must agree in direction.
+    def test_woe_sign_convention_is_exact(self):
+        """WOE must equal ln(%non-event / %event), computed from the binner's
+        own reported counts.
 
-        Asserts directional agreement, not fixed values: the two solvers choose
-        different cut points, so only the sign relationship to the base rate is
-        comparable.
+        This replaces a cross-check against optbinning. That test only asserted
+        directional agreement, skipped whenever optbinning was absent, and made
+        optbinning the last thing in the repo carrying an ortools ceiling. The
+        formula is arithmetic, so pin it directly: exact values, never skips,
+        no dependency.
         """
-        optbinning = pytest.importorskip("optbinning")
-
         rng = np.random.default_rng(7)
         n = 8000
-        # Monotone, non-circular signal so optbinning's ordering assumption holds.
         x = rng.integers(0, 24, size=n)
         p = 0.02 + 0.012 * x
         y = rng.binomial(1, p)
-        base_rate = y.mean()
 
         cb = CyclicalBinner(m=24, gamma=0.0, alpha_min=0.05, e_min=10,
                             ne_min=10, k_min=2, k_max=4).fit(x, y)
 
-        ob = optbinning.OptimalBinning(name="x", dtype="numerical", solver="cp")
-        ob.fit(x.astype(float), y)
-        ob_table = ob.binning_table.build()
-        ob_bins = ob_table[
-            ob_table["Bin"].astype(str).str.startswith("(")
-            | ob_table["Bin"].astype(str).str.startswith("[")
-        ]
-        ob_event_rate = ob_bins["Event rate"].to_numpy(dtype=float)
-        ob_woe = ob_bins["WoE"].to_numpy(dtype=float)
+        rows = cb.result_.woe_table()
+        total_e = sum(r["events"] for r in rows)
+        total_ne = sum(r["non_events"] for r in rows)
+        k, lam = len(rows), cb.lam
 
-        def sign_map(event_rates, woes):
-            """-1 if above-base-rate bins carry negative WOE, +1 if positive."""
-            above = event_rates > base_rate
-            below = event_rates < base_rate
-            assert above.any() and below.any()
-            assert np.all(woes[above] < 0) or np.all(woes[above] > 0)
-            return -1 if np.all(woes[above] < 0) else +1, np.all(woes[below] > 0)
+        for r in rows:
+            p_j = (r["events"] + lam) / (total_e + k * lam)
+            q_j = (r["non_events"] + lam) / (total_ne + k * lam)
+            assert r["woe"] == pytest.approx(np.log(q_j / p_j), abs=1e-9)
 
-        ob_sign, ob_below_pos = sign_map(ob_event_rate, ob_woe)
-        cb_sign, cb_below_pos = sign_map(b_event_rates := cb.result_.event_rates,
-                                         cb.woe_)
-        assert cb_sign == ob_sign, (
-            f"CyclicalBinner WOE sign disagrees with optbinning: "
-            f"cyclical {cb.woe_} at event rates {b_event_rates}, "
-            f"optbinning {ob_woe} at event rates {ob_event_rate}, "
-            f"base rate {base_rate:.4f}"
-        )
-        assert cb_below_pos == ob_below_pos
+        # The convention's observable consequence: a bin riskier than the base
+        # rate carries a NEGATIVE woe. A sign flip anywhere breaks this.
+        base_rate = y.mean()
+        for r in rows:
+            rate = r["events"] / (r["events"] + r["non_events"])
+            if rate > base_rate:
+                assert r["woe"] < 0, f"bin above base rate must have negative woe: {r}"
+            elif rate < base_rate:
+                assert r["woe"] > 0, f"bin below base rate must have positive woe: {r}"
 
 
-class TestValidation:
     def test_out_of_range_raises(self, hourly_data):
         hours, y = hourly_data
         with pytest.raises(ValueError, match=r"\[0"):

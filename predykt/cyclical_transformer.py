@@ -5,15 +5,15 @@ Cyclical Optimal Binning for Credit Risk
 Scikit-learn compatible transformer for IV-maximizing cyclical binning.
 
 Usage:
-    from cyclical_binner import CyclicalBinner
+    from predykt import CyclicalBinner
 
     binner = CyclicalBinner(gamma=0.02, k_max=6)
     binner.fit(temporal_values, targets)
     binned = binner.transform(temporal_values)
 
-WOE convention: ln(%non-event / %event), matching optbinning and hence
-predykt.feature_binning. See CyclicalBinner's Notes for the details and for the
-0.2.0 sign change.
+WOE convention: ln(%non-event / %event), following Navas-Palencia (2020) §2.1
+and Siddiqi's Credit Risk Scorecards. See CyclicalBinner's Notes for the details
+and for the 0.2.0 sign change.
 """
 
 import time
@@ -366,10 +366,12 @@ class CyclicalBinner(BaseEstimator, TransformerMixin):
     above-average event rate gets a negative WOE.
 
     Both sign conventions are in active circulation in the credit-risk
-    literature, so this is not a claim about which one is standard. The point
-    is intra-package consistency: `FeatureBinningAnalyzer` delegates to
-    optbinning directly, and mixing the two conventions inside one scorecard
-    silently sign-flips whichever features came from the odd one out.
+    literature, so this is not a claim about which one is standard. This one is
+    pinned because it is the convention in the sources cited above
+    (Navas-Palencia 2020 §2.1; Siddiqi, Credit Risk Scorecards), and because
+    mixing the two inside one scorecard silently sign-flips whichever features
+    came from the odd one out. optbinning uses the same convention, so values
+    from both agree without a manual negation.
 
     CHANGED IN 0.2.0: `woe_`, `get_woe_encoder()`, `transform_woe()` and
     `result_.woe_table()` return the opposite sign to <= 0.1.2. A scorecard
