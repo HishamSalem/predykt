@@ -94,6 +94,10 @@ One commit per task, in the order below. `pytest -q` after every task.
 
 ## Task 6 — `FeatureBinningAnalyzer`: document, don't delete
 
+> **Superseded in 0.3.0.** The class was removed. It was 214 lines of
+> pass-through around one subtraction, and it made optbinning, and optbinning's
+> `ortools<9.12` ceiling, a requirement for every user. See CHANGELOG 0.3.0.
+
 - [ ] Module docstring: distinction from `CyclicalBinner`; delegates to optbinning so it
       already uses ln(%non-event / %event) — Task 2's flip does not apply.
 - [ ] `pytest.importorskip("catboost")` on `test_catboost_mode_a`.

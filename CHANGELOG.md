@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-11
+
+### Removed (BREAKING)
+
+- **`FeatureBinningAnalyzer` is removed, and with it the `optbinning`
+  dependency.** The class computed `IV_2D - (IV_1 + IV_2)`; everything else in
+  its 214 lines was a thin pass-through to optbinning's `OptimalBinning` and
+  `OptimalBinning2D` plus a `sort_values`. It also duplicated a capability the
+  library already had: `InteractionTester.get_top_n_interactions` is a cheap
+  screen that needs no extra dependency and feeds the same pipeline, and the
+  README described both as candidate generators for `InteractionTester`.
+
+  The heuristic itself is documented as a ten-line recipe in README section 5
+  for anyone who wants it. It is a heuristic with no null distribution behind
+  it, which is why it was never load-bearing.
+
+  Migration: use `get_top_n_interactions`, or the recipe.
+
+### Changed (BREAKING)
+
+- **`matplotlib` is no longer installed by default.** optbinning declared it
+  unconditionally, so it had been arriving transitively. The `plot_*` methods
+  now require `pip install "predykt[plot]"`, which was always how they were
+  documented. Nothing raises at import time; the plot imports are function-local.
+- **`scikit-learn` is now plain `>=1.6`**, replacing 0.2.0's `python_version`
+  fork. That fork existed only because optbinning caps `ortools<9.12` from
+  0.20.1 on and no ortools below 9.12 ships a wheel for Python 3.13+, which
+  forced a `scikit-learn<1.8` cap there. With optbinning gone the ceiling goes
+  with it, and the base install resolves a current scikit-learn on every
+  supported Python.
+
+  The floor stays at 1.6 rather than dropping to 1.1: predykt has never been
+  tested below it, and 1.6 has wheels on every supported interpreter.
+
+### Added
+
+- **CI job that installs with no extras.** Every existing job installs
+  `.[test]`, which on 3.13+ pinned `scikit-learn<1.8` through optbinning, so no
+  job had ever run predykt against scikit-learn 1.8 or 1.9 even though that is
+  what a plain `pip install predykt` now resolves. The new job installs bare,
+  prints the resolved scikit-learn, asserts optbinning is absent, and runs the
+  suite on 3.12 and 3.13.
+
+  Verified locally against scikit-learn 1.9.0: 113 passed.
+
+- `Programming Language :: Python :: 3.13` classifier, which had been missing
+  despite 3.13 being in the CI matrix since 0.2.0.
+
+- **`optbinning` is gone from every dependency list, including `test`.** The
+  cross-check that needed it, `test_directional_agreement_with_optbinning`,
+  asserted directional agreement only and skipped whenever optbinning was
+  absent. It is replaced by `test_woe_sign_convention_is_exact`, which pins
+  `woe == ln(%non-event / %event)` exactly against the binner's own reported
+  counts, plus the observable consequence that a bin above the base rate carries
+  a negative WOE. Deterministic, never skips, needs nothing installed, and
+  mutation-verified: flipping the sign in the source fails it.
+
+  This removes the last `python_version` fork in the repo apart from the
+  documented xgboost one, so the ortools ceiling is genuinely gone rather than
+  relocated into a test extra.
+
 ## [0.2.0] - 2026-07-31
 
 ### Changed (BREAKING)
@@ -196,7 +257,8 @@ Released before this changelog existed.
 
 Released before this changelog existed.
 
-[Unreleased]: https://github.com/HishamSalem/predykt/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/HishamSalem/predykt/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/HishamSalem/predykt/releases/tag/v0.3.0
 [0.2.0]: https://github.com/HishamSalem/predykt/releases/tag/v0.2.0
 [0.1.2]: https://github.com/HishamSalem/predykt/releases/tag/v0.1.2
 [0.1.1]: https://github.com/HishamSalem/predykt/releases/tag/v0.1.1

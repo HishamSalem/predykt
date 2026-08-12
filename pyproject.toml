@@ -19,29 +19,14 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 dependencies = [
     "numpy>=1.22",
     "pandas>=1.5",
     "shap>=0.41",
-    # optbinning and scikit-learn have to be pinned as a pair, and the pair that
-    # works depends on the Python version.
-    #
-    # optbinning <=0.20.1 calls check_array(force_all_finite=...), an argument
-    # removed in scikit-learn 1.8; 0.21.0 is the first release using
-    # ensure_all_finite, and it declares scikit-learn >=1.6.
-    #
-    # But 0.20.1 and 0.21.0 also cap ortools <9.12, and ortools publishes no
-    # wheel below 9.12 for Python 3.13+ and no sdist to build from. So on 3.13+
-    # the newest installable optbinning is 0.20.0, which still needs the
-    # scikit-learn <1.8 cap. Requiring optbinning >=0.21 unconditionally would
-    # make predykt uninstallable on 3.13 and 3.14 with a resolver error naming
-    # ortools, a package the user never asked for.
-    "scikit-learn>=1.6; python_version < '3.13'",
-    "scikit-learn>=1.1,<1.8; python_version >= '3.13'",
-    "optbinning>=0.21; python_version < '3.13'",
-    "optbinning>=0.17,<0.20.1; python_version >= '3.13'",
+    "scikit-learn>=1.6",
     "scipy>=1.9",
     "statsmodels>=0.13",
     "tqdm>=4.64",
